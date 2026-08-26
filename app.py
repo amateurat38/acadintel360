@@ -97,6 +97,9 @@ for key, default in {
     "db_cache": {},
     "raw_version": 0,
     "db_version": 0,
+    "history_restore_checked": False,
+    "current_history_id": None,
+    "current_history_name": None,
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -253,6 +256,284 @@ def db_delete(table, row_id):
     data = sb.table(table).delete().eq("id", row_id).execute().data
     _invalidate_db_cache(table)
     return data
+
+
+# =========================================================
+# PERSISTENT USERMETRICS UPLOAD HISTORY
+# =========================================================
+def _history_tables_ready():
+    if sb is None:
+        return False
+    try:
+        sb.table("usage_batches").select("id").limit(1).execute()
+        return True
+    except Exception:
+        return False
+
+
+def _frame_to_json_records(df):
+    if df is None or df.empty:
+        return []
+
+    work = df.copy()
+
+    if "DateTime" in work.columns:
+        work["DateTime"] = work["DateTime"].apply(
+            lambda value:
+            value.isoformat()
+            if pd.notna(value) and hasattr(value, "isoformat")
+            else None
+        )
+
+    work = work.where(pd.notna(work), None)
+    return json_safe(work.to_dict("records"))
+
+
+def _records_to_usage_frame(records):
+    if not records:
+        return pd.DataFrame(columns=USAGE_COLUMNS)
+
+    frame = pd.DataFrame(records)
+
+    for column in USAGE_COLUMNS:
+        if column not in frame.columns:
+            frame[column] = None
+
+    frame = frame[USAGE_COLUMNS].copy()
+
+    frame["Minutes"] = pd.to_numeric(
+        frame["Minutes"],
+        errors="coerce",
+    ).fillna(0)
+
+    frame["DateTime"] = pd.to_datetime(
+        frame["DateTime"],
+        errors="coerce",
+    )
+
+    for col in [
+        "School",
+        "Teacher",
+        "Teacher Key",
+        "Raw Module",
+        "KPI Module",
+        "Grade",
+        "Subject",
+        "Book",
+        "Source File",
+    ]:
+        frame[col] = frame[col].fillna("").astype(str)
+
+    return frame
+
+
+def list_usage_history(limit=50):
+    if sb is None or not _history_tables_ready():
+        return []
+
+    try:
+        response = (
+            sb.table("usage_batches")
+            .select("*")
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return response.data or []
+    except Exception:
+        return []
+
+
+def save_usage_history(data, uploaded_files):
+    if sb is None:
+        return None, "Supabase is not connected."
+
+    if not _history_tables_ready():
+        return None, (
+            "Upload History database tables are not installed yet. "
+            "Run the one-time SQL setup supplied with this app."
+        )
+
+    if data is None or data.empty:
+        return None, "There is no processed data to save."
+
+    schools = sorted(
+        [
+            str(value)
+            for value in data["School"].dropna().unique().tolist()
+            if str(value).strip()
+        ]
+    )
+
+    if "DateTime" in data.columns:
+        valid_dates = data["DateTime"].dropna()
+    else:
+        valid_dates = pd.Series(dtype="datetime64[ns]")
+
+    date_min = valid_dates.min().date().isoformat() if not valid_dates.empty else None
+    date_max = valid_dates.max().date().isoformat() if not valid_dates.empty else None
+
+    file_names = [f.name for f in (uploaded_files or [])]
+
+    school_label = (
+        schools[0]
+        if len(schools) == 1
+        else f"{len(schools)} schools"
+    )
+
+    period_label = (
+        f"{date_min} to {date_max}"
+        if date_min and date_max
+        else "date unavailable"
+    )
+
+    batch_name = (
+        f"{school_label} | {period_label} | "
+        f"{datetime.now().strftime('%d %b %Y %I:%M %p')}"
+    )
+
+    batch_payload = {
+        "batch_name": batch_name,
+        "source_files": file_names,
+        "row_count": int(len(data)),
+        "date_min": date_min,
+        "date_max": date_max,
+        "schools": schools,
+    }
+
+    inserted = (
+        sb.table("usage_batches")
+        .insert(json_safe(batch_payload))
+        .execute()
+        .data
+    )
+
+    if not inserted:
+        return None, "The history record could not be created."
+
+    batch_id = inserted[0]["id"]
+    records = _frame_to_json_records(data)
+    chunk_size = 500
+
+    try:
+        chunk_payload = []
+
+        for index, start in enumerate(range(0, len(records), chunk_size)):
+            chunk_payload.append(
+                {
+                    "batch_id": batch_id,
+                    "chunk_index": index,
+                    "records": records[start:start + chunk_size],
+                }
+            )
+
+        for start in range(0, len(chunk_payload), 10):
+            (
+                sb.table("usage_batch_chunks")
+                .insert(json_safe(chunk_payload[start:start + 10]))
+                .execute()
+            )
+
+    except Exception as exc:
+        try:
+            sb.table("usage_batches").delete().eq("id", batch_id).execute()
+        except Exception:
+            pass
+
+        return None, f"History save failed: {exc}"
+
+    return {
+        "id": batch_id,
+        "batch_name": batch_name,
+    }, None
+
+
+def load_usage_history(batch_id):
+    if sb is None or not _history_tables_ready():
+        return pd.DataFrame(columns=USAGE_COLUMNS), None, "Upload History is not available."
+
+    try:
+        batch_rows = (
+            sb.table("usage_batches")
+            .select("*")
+            .eq("id", batch_id)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+
+        if not batch_rows:
+            return pd.DataFrame(columns=USAGE_COLUMNS), None, "Saved history item was not found."
+
+        chunks = (
+            sb.table("usage_batch_chunks")
+            .select("chunk_index,records")
+            .eq("batch_id", batch_id)
+            .order("chunk_index")
+            .execute()
+            .data
+            or []
+        )
+
+        records = []
+        for chunk in chunks:
+            records.extend(chunk.get("records") or [])
+
+        frame = _records_to_usage_frame(records)
+        return frame, batch_rows[0], None
+
+    except Exception as exc:
+        return pd.DataFrame(columns=USAGE_COLUMNS), None, f"Could not load history: {exc}"
+
+
+def delete_usage_history(batch_id):
+    if sb is None or not _history_tables_ready():
+        return False, "Upload History is not available."
+
+    try:
+        sb.table("usage_batches").delete().eq("id", batch_id).execute()
+        return True, None
+    except Exception as exc:
+        return False, f"Could not delete history: {exc}"
+
+
+def activate_usage_frame(frame, history_row=None):
+    st.session_state.raw = frame.copy()
+    st.session_state.import_errors = []
+    st.session_state.raw_version = int(st.session_state.get("raw_version", 0)) + 1
+    st.session_state.analytics_cache = {}
+    _invalidate_generated_outputs()
+
+    if history_row:
+        st.session_state.current_history_id = history_row.get("id")
+        st.session_state.current_history_name = history_row.get("batch_name")
+    else:
+        st.session_state.current_history_id = None
+        st.session_state.current_history_name = None
+
+
+def restore_latest_usage_history_once():
+    if st.session_state.get("history_restore_checked"):
+        return
+
+    st.session_state.history_restore_checked = True
+
+    if not st.session_state.raw.empty:
+        return
+
+    history = list_usage_history(limit=1)
+
+    if not history:
+        return
+
+    frame, row, error = load_usage_history(history[0]["id"])
+
+    if error or frame.empty:
+        return
+
+    activate_usage_frame(frame, row)
+
 
 
 # =========================================================
@@ -549,7 +830,7 @@ def current_kpi_signature(school=None):
         round(safe_float(kpis.get("library")), 4),
         round(safe_float(kpis.get("otherModules")), 4),
         int(st.session_state.get("db_version", 0)),
-        "teacher-friendly-v2",
+        "teacher-friendly-history-v3",
     )
 
 
@@ -2129,6 +2410,12 @@ def share_followup_dialog(school, message, school_row, group_url=""):
 
 
 # =========================================================
+# RESTORE LAST SAVED USERMETRICS SESSION
+# =========================================================
+restore_latest_usage_history_once()
+
+
+# =========================================================
 # SIDEBAR
 # =========================================================
 with st.sidebar:
@@ -2151,15 +2438,39 @@ with st.sidebar:
         accept_multiple_files=True,
         help="Upload up to 100 raw company exports together.",
     )
-    if uploaded_files and st.button("⚡ Process Raw Data", use_container_width=True):
-        with st.spinner("Processing and validating files..."):
+    if uploaded_files and st.button("⚡ Process & Save Raw Data", use_container_width=True):
+        with st.spinner("Processing, validating and saving history..."):
             data, errors = combine_usage_files(uploaded_files)
-            st.session_state.raw = data
+
+            history_row = None
+            history_error = None
+
+            if not data.empty:
+                history_row, history_error = save_usage_history(
+                    data,
+                    uploaded_files,
+                )
+
+                activate_usage_frame(
+                    data,
+                    history_row,
+                )
+
             st.session_state.import_errors = errors
-            st.session_state.raw_version = int(st.session_state.get("raw_version", 0)) + 1
-            st.session_state.analytics_cache = {}
+
         if not data.empty:
-            st.success(f"{len(data):,} unique activity rows loaded.")
+            if history_row:
+                st.success(
+                    f"{len(data):,} unique activity rows loaded and saved to History."
+                )
+            else:
+                st.success(
+                    f"{len(data):,} unique activity rows loaded for this session."
+                )
+
+        if history_error:
+            st.warning(history_error)
+
         for error in errors[:8]:
             st.warning(error)
 
@@ -2183,8 +2494,21 @@ with st.sidebar:
     workdays = int(custom_workdays) if override_enabled else default_workdays
     st.caption(f"KPI denominator: {workdays} working day(s)")
 
+    if st.session_state.get("current_history_name"):
+        st.caption(
+            "📌 Loaded history: "
+            + str(st.session_state.current_history_name)
+        )
+
     page = st.radio("Navigate", [
-        "⚡ Quick Desk", "Command Center", "School 360", "Teacher 360", "Follow-Ups", "KPI & Roster", "Ask AcadIntel"
+        "⚡ Quick Desk",
+        "Command Center",
+        "School 360",
+        "Teacher 360",
+        "🗂 Data History",
+        "Follow-Ups",
+        "KPI & Roster",
+        "Ask AcadIntel",
     ])
 
 
@@ -2799,6 +3123,140 @@ elif page == "Teacher 360":
     render_report(st.session_state[key])
     pdf_bytes = make_premium_teacher_pdf(teacher_row, evidence, start_date, end_date, action_days)
     st.download_button("⬇ Download Graphical Teacher 360 PDF", data=pdf_bytes, file_name=re.sub(r"[^A-Za-z0-9]+", "_", teacher_name) + "_360_Audit_Report.pdf", mime="application/pdf", use_container_width=True)
+
+
+
+# =========================================================
+# DATA HISTORY
+# =========================================================
+elif page == "🗂 Data History":
+
+    st.title("🗂 UserMetrics Data History")
+    st.caption(
+        "Processed uploads are saved here so refreshing or reopening the app does not remove your data."
+    )
+
+    if not _history_tables_ready():
+        st.error(
+            "Upload History is not installed in Supabase yet. "
+            "Run the one-time SQL setup file supplied with this app."
+        )
+        st.stop()
+
+    history = list_usage_history(limit=100)
+
+    if not history:
+        st.info(
+            "No saved UserMetrics history yet. Process your next raw upload and it will be saved automatically."
+        )
+
+    else:
+        current_id = st.session_state.get("current_history_id")
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Saved Uploads", len(history))
+        c2.metric("Current Rows", f"{len(st.session_state.raw):,}")
+        c3.metric(
+            "Current Dataset",
+            "Loaded" if not st.session_state.raw.empty else "None",
+        )
+
+        st.divider()
+
+        for row in history:
+            source_files = row.get("source_files") or []
+            schools_saved = row.get("schools") or []
+            created = str(row.get("created_at") or "").replace("T", " ")[:16]
+
+            with st.container(border=True):
+                left, middle, actions = st.columns([4.5, 2.3, 2.2])
+
+                title = row.get("batch_name") or "Saved UserMetrics upload"
+                marker = " • CURRENT" if row.get("id") == current_id else ""
+
+                left.markdown(f"**{title}{marker}**")
+
+                left.caption(
+                    f"Files: {', '.join(source_files[:5])}"
+                    + (f" +{len(source_files)-5} more" if len(source_files) > 5 else "")
+                )
+
+                if schools_saved:
+                    left.caption(
+                        "Schools: "
+                        + ", ".join(str(s) for s in schools_saved[:5])
+                        + (f" +{len(schools_saved)-5} more" if len(schools_saved) > 5 else "")
+                    )
+
+                middle.write(f"Rows: {int(row.get('row_count') or 0):,}")
+                middle.caption(
+                    f"Period: {row.get('date_min') or '—'} to {row.get('date_max') or '—'}"
+                )
+                middle.caption(f"Saved: {created or '—'}")
+
+                if actions.button(
+                    "Load",
+                    key=f"load_history_{row['id']}",
+                    use_container_width=True,
+                    disabled=(row.get("id") == current_id),
+                ):
+                    with st.spinner("Loading saved UserMetrics data..."):
+                        frame, saved_row, error = load_usage_history(row["id"])
+
+                    if error:
+                        st.error(error)
+                    else:
+                        activate_usage_frame(frame, saved_row)
+                        st.success("Saved dataset loaded.")
+                        st.rerun()
+
+                confirm_key = f"confirm_delete_history_{row['id']}"
+
+                if st.session_state.get(confirm_key):
+                    actions.warning("Delete permanently?")
+
+                    yes_col, no_col = actions.columns(2)
+
+                    if yes_col.button(
+                        "Yes",
+                        key=f"yes_delete_history_{row['id']}",
+                        use_container_width=True,
+                    ):
+                        ok, error = delete_usage_history(row["id"])
+
+                        if error:
+                            st.error(error)
+                        else:
+                            st.session_state[confirm_key] = False
+
+                            if row.get("id") == st.session_state.get("current_history_id"):
+                                st.session_state.current_history_id = None
+                                st.session_state.current_history_name = None
+
+                            st.success("Saved history deleted.")
+                            st.rerun()
+
+                    if no_col.button(
+                        "No",
+                        key=f"no_delete_history_{row['id']}",
+                        use_container_width=True,
+                    ):
+                        st.session_state[confirm_key] = False
+                        st.rerun()
+
+                else:
+                    if actions.button(
+                        "🗑 Delete History",
+                        key=f"delete_history_{row['id']}",
+                        use_container_width=True,
+                    ):
+                        st.session_state[confirm_key] = True
+                        st.rerun()
+
+        st.info(
+            "Deleting a History item removes its saved database copy. "
+            "If that dataset is currently open, it remains visible until the app is refreshed or another saved dataset is loaded."
+        )
 
 
 # =========================================================
