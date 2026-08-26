@@ -520,6 +520,85 @@ def save_kpi(scope, module_key, value, school_name=None):
         db_insert("kpi_settings", payload)
 
 
+def kpi_scope_details(school=None):
+    """Return global values, active local overrides, effective values and source labels."""
+    rows = load_kpi_rows()
+    global_values = {k: v[1] for k, v in DEFAULT_KPI.items()}
+
+    for module_key in global_values:
+        matches = [
+            r for r in rows
+            if r.get("scope") == "GLOBAL"
+            and r.get("module_key") == module_key
+            and r.get("active", True)
+        ]
+        if matches:
+            matches.sort(key=lambda x: x.get("updated_at") or x.get("created_at") or "")
+            global_values[module_key] = safe_float(
+                matches[-1].get("target_minutes_per_day"),
+                global_values[module_key],
+            )
+
+    local_values = {}
+    if school:
+        for module_key in global_values:
+            matches = [
+                r for r in rows
+                if r.get("scope") == "SCHOOL"
+                and r.get("school_name") == school
+                and r.get("module_key") == module_key
+                and r.get("active", True)
+            ]
+            if matches:
+                matches.sort(key=lambda x: x.get("updated_at") or x.get("created_at") or "")
+                local_values[module_key] = safe_float(
+                    matches[-1].get("target_minutes_per_day"),
+                    global_values[module_key],
+                )
+
+    effective = dict(global_values)
+    effective.update(local_values)
+
+    source = {
+        module_key: (
+            f"Local override — {school}"
+            if module_key in local_values
+            else "Global default"
+        )
+        for module_key in global_values
+    }
+
+    return {
+        "global": global_values,
+        "local": local_values,
+        "effective": effective,
+        "source": source,
+        "has_local_override": bool(local_values),
+    }
+
+
+def reset_school_kpis_to_global(school_name):
+    """Deactivate all active school-specific KPI rows so the school inherits global defaults."""
+    rows = load_kpi_rows()
+    changed = 0
+    for row in rows:
+        if (
+            row.get("scope") == "SCHOOL"
+            and row.get("school_name") == school_name
+            and row.get("active", True)
+        ):
+            db_update(
+                "kpi_settings",
+                {
+                    "active": False,
+                    "updated_at": datetime.utcnow().isoformat(),
+                },
+                row["id"],
+            )
+            changed += 1
+    return changed
+
+
 # =========================================================
 # REVIEW PERIOD + ANALYTICS
 # =========================================================
@@ -1090,6 +1169,13 @@ def add_teacher_report_page(pdf, row, evidence, start_date, end_date, action_day
     y=pdf_progress(pdf,"Other Modules",row.get("Other KPI %"),pdf.l_margin,y+2,pdf.epw)
     pdf.set_y(y+4)
 
+    pdf_note_box(
+        pdf,
+        "Mathematics behind this Teacher Health Score",
+        teacher_math_explanation(row),
+        "purple",
+    )
+
     diagnosis,strength,focus,plan=teacher_auto_insights(row,action_days)
     pdf_note_box(pdf,"Performance diagnosis",diagnosis,"info")
     pdf_note_box(pdf,"Relative strength",strength,"success")
@@ -1107,6 +1193,113 @@ def add_teacher_report_page(pdf, row, evidence, start_date, end_date, action_day
     pdf_note_box(pdf,f"{action_days}-day development plan",plan,"purple")
     pdf_note_box(pdf,"Closing note","The next review should compare the same verified KPIs, active-day consistency and content breadth. Improvement should be recognised where evidence confirms progress.","success")
     add_signature(pdf)
+
+
+
+def teacher_math_explanation(row):
+    workdays = max(0, int(safe_float(row.get("Eligible Working Days"))))
+    active_days = max(0, int(safe_float(row.get("Active Days"))))
+
+    lesson_actual = safe_float(row.get("Lesson Delivery"))
+    lesson_target = safe_float(row.get("Lesson Target"))
+    lesson_pct = safe_float(row.get("Lesson KPI %"))
+
+    library_actual = safe_float(row.get("Library"))
+    library_target = safe_float(row.get("Library Target"))
+    library_pct = safe_float(row.get("Library KPI %"))
+
+    other_actual = safe_float(row.get("Other Modules"))
+    other_target = safe_float(row.get("Other Target"))
+    other_pct = safe_float(row.get("Other KPI %"))
+
+    consistency = min((active_days / workdays * 100), 100) if workdays > 0 else 0
+    health = safe_float(row.get("Health Score"))
+
+    return (
+        "HOW THIS TEACHER HEALTH SCORE IS CALCULATED\n"
+        f"1. Lesson Delivery KPI % = Actual / Target x 100 = "
+        f"{lesson_actual:.1f} / {lesson_target:.1f} x 100 = {lesson_pct:.1f}%.\n"
+        f"2. Library KPI % = Actual / Target x 100 = "
+        f"{library_actual:.1f} / {library_target:.1f} x 100 = {library_pct:.1f}%.\n"
+        f"3. Other Modules KPI % = Actual / Target x 100 = "
+        f"{other_actual:.1f} / {other_target:.1f} x 100 = {other_pct:.1f}%.\n"
+        f"4. Consistency % = Active Days / Eligible Working Days x 100 = "
+        f"{active_days} / {workdays} x 100 = {consistency:.1f}%.\n"
+        "5. Teacher Health Score = "
+        "[min(Lesson KPI %, 100) x 40%] + "
+        "[min(Library KPI %, 100) x 35%] + "
+        "[min(Other Modules KPI %, 100) x 15%] + "
+        "[Consistency % x 10%].\n"
+        f"Using the verified values above, the final rounded Teacher Health Score = {health:.0f}/100.\n"
+        "Important: KPI percentages are capped at 100% only for the Health Score calculation, "
+        "so over-performance in one module cannot fully compensate for under-performance in another."
+    )
+
+
+def school_math_explanation(school_row, teacher_data, workdays):
+    total = max(0, int(safe_float(school_row.get("Teachers"))))
+    active = max(0, int(safe_float(school_row.get("Active"))))
+    met_all = max(0, int(safe_float(school_row.get("Met All KPIs"))))
+    compliance = safe_float(school_row.get("Overall Compliance %"))
+    health = safe_float(school_row.get("Health Score"))
+
+    if teacher_data is not None and not teacher_data.empty:
+        scores = [
+            int(round(safe_float(v)))
+            for v in teacher_data["Health Score"].tolist()
+        ]
+        score_sum = sum(scores)
+        score_text = " + ".join(str(v) for v in scores)
+        average_text = (
+            f"({score_text}) / {len(scores)} = "
+            f"{score_sum} / {len(scores)} = {score_sum / len(scores):.2f}, "
+            f"rounded to {health:.0f}/100."
+        )
+    else:
+        average_text = "No teacher-level Health Scores are available for this review period."
+
+    return (
+        "HOW THE INSTITUTIONAL NUMBERS ARE CALCULATED\n"
+        "Institution Health is the arithmetic mean of the individual Teacher Health Scores.\n"
+        f"Current calculation: {average_text}\n\n"
+        "Full KPI Compliance % = Teachers meeting ALL THREE KPI targets / Total Teachers x 100.\n"
+        f"Current calculation: {met_all} / {total} x 100 = {compliance:.1f}%.\n\n"
+        "Active Teachers = teachers with recorded usage greater than 0 minutes during the selected review period.\n"
+        f"Current result: {active}/{total} active teachers.\n\n"
+        "Met All KPIs = number of teachers whose Lesson Delivery KPI %, Library KPI %, "
+        "and Other Modules KPI % are each at least 100%.\n"
+        f"Current result: {met_all} teacher(s).\n\n"
+        f"Eligible working days used for KPI targets in this report: {workdays}. Sundays are excluded unless a working-day override is used."
+    )
+
+
+def kpi_target_math_explanation(school_row, workdays, teacher_count):
+    school_name = str(school_row.get("School") or "").strip()
+    scope = kpi_scope_details(school_name if school_name else None)
+
+    ld_daily = safe_float(school_row.get("Lesson Target / Day"))
+    lib_daily = safe_float(school_row.get("Library Target / Day"))
+    other_daily = safe_float(school_row.get("Other Target / Day"))
+
+    return (
+        "KPI TARGET MATHEMATICS\n"
+        f"Lesson Delivery daily benchmark: {ld_daily:.1f} min/day "
+        f"({scope['source']['lessonDelivery']}).\n"
+        f"Library daily benchmark: {lib_daily:.1f} min/day "
+        f"({scope['source']['library']}).\n"
+        f"Other Modules daily benchmark: {other_daily:.1f} min/day "
+        f"({scope['source']['otherModules']}).\n\n"
+        "Teacher review-period target = Daily KPI target x Eligible Working Days.\n"
+        f"Lesson Delivery: {ld_daily:.1f} x {workdays} = {ld_daily * workdays:.1f} min per teacher.\n"
+        f"Library: {lib_daily:.1f} x {workdays} = {lib_daily * workdays:.1f} min per teacher.\n"
+        f"Other Modules: {other_daily:.1f} x {workdays} = {other_daily * workdays:.1f} min per teacher.\n\n"
+        "Institutional cumulative target is calculated automatically; it is not a separate KPI setting.\n"
+        "Formula = Per-teacher review target x Number of teachers included in the report.\n"
+        f"Lesson Delivery school target: {ld_daily:.1f} x {workdays} x {teacher_count} = {ld_daily * workdays * teacher_count:.1f} min.\n"
+        f"Library school target: {lib_daily:.1f} x {workdays} x {teacher_count} = {lib_daily * workdays * teacher_count:.1f} min.\n"
+        f"Other Modules school target: {other_daily:.1f} x {workdays} x {teacher_count} = {other_daily * workdays * teacher_count:.1f} min."
+    )
+
 
 
 def make_premium_school_pack_pdf(school_row, teacher_data, raw_school, start_date, end_date, workdays, action_days=7, ai_text="", signature_name="Dilip Kumar Vishwakarma"):
@@ -1146,6 +1339,19 @@ def make_premium_school_pack_pdf(school_row, teacher_data, raw_school, start_dat
         y=pdf_progress(pdf,f"{label}  {actuals[label]:.1f}/{targets[label]:.1f} min",pct,pdf.l_margin,y,pdf.epw)
         y+=2
     pdf.set_y(y+2)
+
+    pdf_note_box(
+        pdf,
+        "How the KPI targets are derived",
+        kpi_target_math_explanation(school_row, workdays, teacher_count),
+        "info",
+    )
+    pdf_note_box(
+        pdf,
+        "How the Institution Health and compliance figures are derived",
+        school_math_explanation(school_row, teacher_data, workdays),
+        "purple",
+    )
 
     if not teacher_data.empty:
         health=teacher_data.sort_values("Health Score",ascending=False).head(12)
@@ -2112,35 +2318,140 @@ elif page == "KPI & Roster":
     t1, t2, t3, t4 = st.tabs(["🎯 KPI Settings", "👩‍🏫 Master Roster", "🏫 Shared Accounts", "🤖 Gemini Diagnostics"])
 
     with t1:
-        current = effective_kpis()
-        st.subheader("Global Default KPIs")
+        st.subheader("🌐 Global KPI Benchmarks")
+        st.caption(
+            "These values become the default for every school that does not have its own local override."
+        )
+
+        global_scope = kpi_scope_details()
+        global_values = global_scope["global"]
+
         with st.form("global_kpis"):
-            l = st.number_input("Lesson Delivery minutes/day", min_value=0.0, value=float(current["lessonDelivery"]), step=1.0)
-            lib = st.number_input("Library minutes/day", min_value=0.0, value=float(current["library"]), step=1.0)
-            oth = st.number_input("Other Modules combined minutes/day", min_value=0.0, value=float(current["otherModules"]), step=1.0)
-            if st.form_submit_button("Save Global KPI", use_container_width=True):
+            l = st.number_input(
+                "Lesson Delivery — minutes/day",
+                min_value=0.0,
+                value=float(global_values["lessonDelivery"]),
+                step=1.0,
+            )
+            lib = st.number_input(
+                "Library — minutes/day",
+                min_value=0.0,
+                value=float(global_values["library"]),
+                step=1.0,
+            )
+            oth = st.number_input(
+                "Other Modules — combined minutes/day",
+                min_value=0.0,
+                value=float(global_values["otherModules"]),
+                step=1.0,
+            )
+
+            if st.form_submit_button("Save Global Benchmarks", use_container_width=True):
                 save_kpi("GLOBAL", "lessonDelivery", l)
                 save_kpi("GLOBAL", "library", lib)
                 save_kpi("GLOBAL", "otherModules", oth)
-                st.success("Global KPIs saved.")
+                st.success("Global KPI benchmarks saved.")
                 st.rerun()
+
+        st.info(
+            "Global changes affect all schools that are inheriting the global benchmarks. "
+            "Schools with a Local Override remain unchanged."
+        )
 
         possible = set(schools["School"].tolist() if not schools.empty else [])
         possible.update(r["school_name"] for r in db_select("schools"))
+
         if possible:
-            st.subheader("School-Specific KPI Override")
-            s = st.selectbox("School", sorted(possible), key="kpi_school")
-            eff = effective_kpis(s)
+            st.divider()
+            st.subheader("🏫 Local School KPI Override")
+            st.caption(
+                "Use this only when a particular school's subscription package, implementation phase, "
+                "infrastructure or agreed benchmark requires different targets."
+            )
+
+            s = st.selectbox("Select School", sorted(possible), key="kpi_school")
+            detail = kpi_scope_details(s)
+            eff = detail["effective"]
+
+            source_rows = pd.DataFrame(
+                [
+                    {
+                        "Module": "Lesson Delivery",
+                        "Global": detail["global"]["lessonDelivery"],
+                        "Local": detail["local"].get("lessonDelivery", "—"),
+                        "Effective": eff["lessonDelivery"],
+                        "Source": detail["source"]["lessonDelivery"],
+                    },
+                    {
+                        "Module": "Library",
+                        "Global": detail["global"]["library"],
+                        "Local": detail["local"].get("library", "—"),
+                        "Effective": eff["library"],
+                        "Source": detail["source"]["library"],
+                    },
+                    {
+                        "Module": "Other Modules",
+                        "Global": detail["global"]["otherModules"],
+                        "Local": detail["local"].get("otherModules", "—"),
+                        "Effective": eff["otherModules"],
+                        "Source": detail["source"]["otherModules"],
+                    },
+                ]
+            )
+            st.dataframe(source_rows, use_container_width=True, hide_index=True)
+
+            if detail["has_local_override"]:
+                st.success(f"{s} is currently using a Local KPI Override.")
+            else:
+                st.info(f"{s} is currently inheriting the Global KPI Benchmarks.")
+
             with st.form("school_kpis"):
-                sl = st.number_input("Lesson Delivery", min_value=0.0, value=float(eff["lessonDelivery"]), step=1.0)
-                sLib = st.number_input("Library", min_value=0.0, value=float(eff["library"]), step=1.0)
-                so = st.number_input("Other Modules", min_value=0.0, value=float(eff["otherModules"]), step=1.0)
-                if st.form_submit_button("Save School Override", use_container_width=True):
+                sl = st.number_input(
+                    "Local Lesson Delivery — minutes/day",
+                    min_value=0.0,
+                    value=float(eff["lessonDelivery"]),
+                    step=1.0,
+                )
+                sLib = st.number_input(
+                    "Local Library — minutes/day",
+                    min_value=0.0,
+                    value=float(eff["library"]),
+                    step=1.0,
+                )
+                so = st.number_input(
+                    "Local Other Modules — combined minutes/day",
+                    min_value=0.0,
+                    value=float(eff["otherModules"]),
+                    step=1.0,
+                )
+
+                save_local = st.form_submit_button(
+                    "Save Local Override for This School",
+                    use_container_width=True,
+                )
+
+                if save_local:
                     save_kpi("SCHOOL", "lessonDelivery", sl, s)
                     save_kpi("SCHOOL", "library", sLib, s)
                     save_kpi("SCHOOL", "otherModules", so, s)
-                    st.success("School-specific KPIs saved.")
+                    st.success(f"Local KPI override saved for {s}.")
                     st.rerun()
+
+            if detail["has_local_override"]:
+                if st.button(
+                    "↩ Reset This School to Global Benchmarks",
+                    use_container_width=True,
+                    key="reset_school_kpi",
+                ):
+                    reset_school_kpis_to_global(s)
+                    st.success(f"{s} will now inherit the Global KPI Benchmarks.")
+                    st.rerun()
+
+            st.caption(
+                "School cumulative targets are calculated automatically as: "
+                "daily benchmark × eligible working days × number of teachers. "
+                "Eligible working days can already be manually overridden from the Review Period controls."
+            )
 
     with t2:
         roster_files = st.file_uploader("Upload Master Roster CSV/XLSX", type=["csv", "xlsx"], accept_multiple_files=True, key="roster")
