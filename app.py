@@ -66,6 +66,9 @@ st.markdown(
     .hero h1 {margin:0; font-size:38px;}
     .hero p {margin:.35rem 0 0; opacity:.92;}
     .card {background:white; border:1px solid #e8eaf2; border-radius:18px; padding:16px; margin:8px 0;}
+    section[data-testid="stSidebar"] {min-width:300px !important; max-width:300px !important;}
+    .stSelectbox > div > div {border-radius:14px;}
+    div[data-testid="stVerticalBlockBorderWrapper"] {border-radius:18px;}
     .ai-card {border-radius:18px; padding:16px 18px; margin:9px 0; border-left:5px solid #4f46e5; background:#f8fafc;}
     div[data-testid="stButton"] button, div[data-testid="stDownloadButton"] button, div[data-testid="stLinkButton"] a {border-radius:12px; font-weight:700;}
     </style>
@@ -840,9 +843,12 @@ def make_text_pdf(title, subtitle, report_text, evidence_df=None):
     pdf.add_page()
     pdf.ln(18)
     pdf.set_font("Helvetica", "B", 16)
-    pdf.multi_cell(0, 8, pdf_safe(title))
+    pdf.set_x(pdf.l_margin)
+    pdf.multi_cell(pdf.epw, 8, pdf_safe(title))
+    pdf.set_x(pdf.l_margin)
     pdf.set_font("Helvetica", "", 9)
-    pdf.multi_cell(0, 5, pdf_safe(subtitle))
+    pdf.multi_cell(pdf.epw, 5, pdf_safe(subtitle))
+    pdf.set_x(pdf.l_margin)
     pdf.ln(3)
 
     for block in clean_ai_text(report_text).split("\n\n"):
@@ -853,12 +859,17 @@ def make_text_pdf(title, subtitle, report_text, evidence_df=None):
         if len(lines) > 1 and lines[0].strip().isupper():
             pdf.set_fill_color(242, 244, 255)
             pdf.set_font("Helvetica", "B", 10)
-            pdf.multi_cell(0, 7, pdf_safe(lines[0].strip()), fill=True)
+            pdf.set_x(pdf.l_margin)
+            pdf.multi_cell(pdf.epw, 7, pdf_safe(lines[0].strip()), fill=True)
+            pdf.set_x(pdf.l_margin)
             pdf.set_font("Helvetica", "", 9)
-            pdf.multi_cell(0, 5.5, pdf_safe("\n".join(lines[1:])))
+            pdf.multi_cell(pdf.epw, 5.5, pdf_safe("\n".join(lines[1:])))
+            pdf.set_x(pdf.l_margin)
         else:
             pdf.set_font("Helvetica", "", 9)
-            pdf.multi_cell(0, 5.5, pdf_safe(block))
+            pdf.set_x(pdf.l_margin)
+            pdf.multi_cell(pdf.epw, 5.5, pdf_safe(block))
+            pdf.set_x(pdf.l_margin)
         pdf.ln(2)
 
     if evidence_df is not None and not evidence_df.empty:
@@ -886,6 +897,12 @@ def make_text_pdf(title, subtitle, report_text, evidence_df=None):
             pdf.ln()
 
     return bytes(pdf.output())
+
+
+@st.cache_data(show_spinner=False, max_entries=80)
+def cached_text_pdf(title, subtitle, report_text):
+    """Build a PDF once per unique report. Keeps normal navigation fast."""
+    return make_text_pdf(title, subtitle, report_text)
 
 
 # =========================================================
@@ -971,7 +988,7 @@ with st.sidebar:
     st.caption(f"KPI denominator: {workdays} working day(s)")
 
     page = st.radio("Navigate", [
-        "Command Center", "Report & WhatsApp Hub", "School 360", "Teacher 360", "Follow-Ups", "KPI & Roster", "Ask AcadIntel"
+        "⚡ Quick Desk", "Command Center", "School 360", "Teacher 360", "Follow-Ups", "KPI & Roster", "Ask AcadIntel"
     ])
 
 
@@ -998,9 +1015,166 @@ if st.session_state.raw.empty and roster_dataframe().empty:
 
 
 # =========================================================
+# QUICK DESK - DAILY OPERATIONS IN ONE SCREEN
+# =========================================================
+if page == "⚡ Quick Desk":
+    st.markdown(
+        '<div class="hero"><h1>⚡ Quick Desk</h1><p>Select a school once. Report, PDF, WhatsApp, call, group and follow-up stay within one screen.</p></div>',
+        unsafe_allow_html=True,
+    )
+
+    if schools.empty:
+        st.warning("No school data is available for the selected review period. Upload and process UserMetrics first.")
+        st.stop()
+
+    school = st.selectbox("🏫 School", schools["School"].tolist(), key="quick_school")
+    school_row = schools[schools["School"] == school].iloc[0]
+    school_teachers = teachers[teachers["School"] == school].copy()
+    school_raw = period_raw[period_raw["School"] == school].copy()
+    facts = school_verified_facts(school_row, school_teachers, school_raw, start_date, end_date, workdays)
+
+    contact_rows = db_select("schools", {"school_name": school})
+    contact = contact_rows[0] if contact_rows else {}
+    phone = str(contact.get("contact_phone") or "")
+    group_url = str(contact.get("whatsapp_group_url") or "")
+    clean_phone = re.sub(r"\D", "", phone)
+
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Health", f"{school_row['Health Score']}/100")
+    m2.metric("Compliance", f"{school_row['Overall Compliance %']}%")
+    m3.metric("Active", f"{school_row['Active']}/{school_row['Teachers']}")
+    m4.metric("Inactive", school_row["Inactive / Never Logged In"])
+    m5.metric("Working Days", workdays)
+
+    action_days = st.segmented_control(
+        "Action plan", options=[7, 15], default=7, format_func=lambda x: f"{x} days", key="quick_action_days"
+    ) if hasattr(st, "segmented_control") else st.radio(
+        "Action plan", [7, 15], horizontal=True, key="quick_action_days"
+    )
+    action_days = int(action_days or 7)
+
+    base_report = deterministic_school_summary(school_row, action_days)
+    report_key = f"quick_report::{school}::{start_date}::{end_date}::{workdays}::{action_days}"
+    if report_key not in st.session_state:
+        st.session_state[report_key] = base_report
+    report_text = st.session_state[report_key]
+
+    priority = school_teachers.sort_values(["Health Score", "Total Minutes"]).head(4) if not school_teachers.empty else pd.DataFrame()
+    priority_names = ", ".join(priority["Teacher"].astype(str).tolist()) if not priority.empty else "No priority teachers identified"
+    message = (
+        f"Dear Sir/Ma'am,\n\n"
+        f"Please find the implementation performance update for {school} for {start_date} to {end_date} ({workdays} working days).\n\n"
+        f"📊 Health Score: {school_row['Health Score']}/100\n"
+        f"🎯 Full KPI Compliance: {school_row['Overall Compliance %']}%\n"
+        f"👩‍🏫 Active Teachers: {school_row['Active']}/{school_row['Teachers']}\n"
+        f"⚠️ Priority Review: {priority_names}\n\n"
+        f"The report contains module-wise evidence, teacher-level implementation gaps and a {action_days}-day action plan. "
+        f"Kindly review the same so that we can align the next implementation actions.\n\n"
+        f"Regards,\nDilip Kumar Vishwakarma"
+    )
+
+    # PDF is deterministic and cached: available immediately without Gemini/network wait.
+    try:
+        pdf_bytes = cached_text_pdf(
+            f"School 360 Intelligence Report - {school}",
+            f"Review Period: {start_date} to {end_date} | Working Days: {workdays}",
+            report_text,
+        )
+        pdf_error = None
+    except Exception as exc:
+        pdf_bytes = None
+        pdf_error = str(exc)
+
+    st.markdown("#### 🚀 One-Tap Actions")
+    q1, q2, q3, q4, q5 = st.columns(5)
+    if pdf_bytes is not None:
+        q1.download_button(
+            "⬇ PDF", data=pdf_bytes,
+            file_name=re.sub(r"[^A-Za-z0-9]+", "_", school) + "_School_360.pdf",
+            mime="application/pdf", use_container_width=True,
+        )
+    else:
+        q1.button("⬇ PDF unavailable", disabled=True, use_container_width=True)
+
+    q2.link_button(
+        "💬 WhatsApp", "https://wa.me/?text=" + urllib.parse.quote(message),
+        use_container_width=True,
+    )
+    if group_url:
+        q3.link_button("👥 Group", group_url, use_container_width=True)
+    else:
+        q3.button("👥 Add Group", disabled=True, use_container_width=True)
+    if clean_phone:
+        q4.link_button("📞 Call", f"tel:+{clean_phone}", use_container_width=True)
+    else:
+        q4.button("📞 Add Number", disabled=True, use_container_width=True)
+    if q5.button("📅 Follow Up", use_container_width=True):
+        st.session_state.follow_school = school
+
+    if st.session_state.follow_school == school:
+        followup_dialog(school)
+
+    if pdf_error:
+        st.caption("PDF could not be prepared on this run. Other actions remain available. Error: " + pdf_error)
+
+    # Missing contact data is editable here instead of forcing a trip to another screen.
+    if not phone or not group_url:
+        with st.expander("➕ Complete school contact once", expanded=False):
+            c1, c2 = st.columns(2)
+            quick_phone = c1.text_input("KDM mobile number", value=phone, key=f"quick_phone_{school}")
+            quick_group = c2.text_input("WhatsApp group link", value=group_url, key=f"quick_group_{school}")
+            if st.button("Save contact", key=f"save_quick_contact_{school}"):
+                payload = {
+                    "school_name": school,
+                    "contact_phone": quick_phone.strip(),
+                    "whatsapp_group_url": quick_group.strip(),
+                    "updated_at": datetime.utcnow().isoformat(),
+                }
+                if contact:
+                    db_update("schools", payload, contact["id"])
+                else:
+                    db_insert("schools", payload)
+                st.rerun()
+
+    ai_col, msg_col = st.columns([1, 1])
+    with ai_col:
+        st.markdown("#### 🧠 Gemini Enhancement")
+        st.caption("Optional. Normal dashboard, PDF and WhatsApp do not wait for Gemini.")
+        if st.button("✨ Enhance Report with Gemini", type="primary", use_container_width=True, key=f"quick_ai_{school}"):
+            try:
+                with st.spinner("Gemini is enriching the verified report..."):
+                    text, used_model = ai_generate(school_report_prompt(facts, action_days), force=True)
+                st.session_state[report_key] = text
+                st.session_state[report_key + "::model"] = used_model
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Gemini could not generate this report: {exc}")
+        if st.session_state.get(report_key + "::model"):
+            st.success("Gemini active: " + st.session_state[report_key + "::model"])
+
+    with msg_col:
+        st.markdown("#### 💬 Ready-to-Send Message")
+        st.text_area("Customized school message", message, height=215, key=f"quick_message_{school}")
+
+    st.markdown("#### 📄 Report Preview")
+    render_report(st.session_state[report_key])
+
+    st.markdown("#### 👩‍🏫 Priority Teachers")
+    if school_teachers.empty:
+        st.info("No teacher records are available for this school in the selected period.")
+    else:
+        st.dataframe(
+            school_teachers.sort_values(["Health Score", "Total Minutes"])[
+                ["Teacher", "Status", "Health Score", "Lesson KPI %", "Library KPI %", "Other KPI %", "Total Minutes"]
+            ].head(12),
+            use_container_width=True, hide_index=True,
+        )
+
+
+# =========================================================
 # COMMAND CENTER
 # =========================================================
-if page == "Command Center":
+elif page == "Command Center":
     st.markdown('<div class="hero"><h1>Academic Command Center</h1><p>Portfolio health, priorities and follow-up intelligence at a glance.</p></div>', unsafe_allow_html=True)
 
     if teachers.empty:
@@ -1052,7 +1226,7 @@ if page == "Command Center":
 # =========================================================
 # REPORT & WHATSAPP HUB
 # =========================================================
-elif page == "Report & WhatsApp Hub":
+elif page == "__legacy_report_hub__":
     if schools.empty:
         st.warning("No school data available. Upload and process UserMetrics first.")
         st.stop()
@@ -1132,7 +1306,7 @@ elif page == "Report & WhatsApp Hub":
 
     pdf_key = "pdf::" + hashlib.sha256((school + str(start_date) + str(end_date) + report_text).encode("utf-8")).hexdigest()
     if pdf_key not in st.session_state:
-        st.session_state[pdf_key] = make_text_pdf(
+        st.session_state[pdf_key] = cached_text_pdf(
             f"School 360 Intelligence Report - {school}",
             f"Review Period: {start_date} to {end_date} | Working Days: {workdays}",
             report_text,
