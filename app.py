@@ -1901,11 +1901,11 @@ def build_analytics(
             )
         )
 
-    teacher_df = pd.DataFrame(
+        teacher_df = pd.DataFrame(
         records
     )
 
-        if teacher_df.empty:
+    if teacher_df.empty:
         return (
             pd.DataFrame(
                 columns=[
