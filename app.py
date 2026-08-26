@@ -1905,62 +1905,56 @@ def build_analytics(
         records
     )
 
-    if teacher_df.empty:
-
-    teacher_df = pd.DataFrame(
-        columns=[
-            "School",
-            "Teacher",
-            "Teacher Key",
-            "Rostered",
-            "Status",
-            "Lesson Delivery",
-            "Lesson Target",
-            "Lesson KPI %",
-            "Library",
-            "Library Target",
-            "Library KPI %",
-            "Other Modules",
-            "Other Target",
-            "Other KPI %",
-            "Total Minutes",
-            "Active Days",
-            "Eligible Working Days",
-            "Books Used",
-            "Grades Covered",
-            "Subjects Covered",
-            "First Activity",
-            "Last Activity",
-            "Grade",
-            "Subject",
-            "Health Score",
-        ]
-    )
-
-    school_df = pd.DataFrame(
-        columns=[
-            "School",
-            "Teachers",
-            "Active",
-            "Inactive / Never Logged In",
-            "Met All KPIs",
-            "Overall Compliance %",
-            "Health Score",
-            "Lesson Delivery Minutes",
-            "Library Minutes",
-            "Other Modules Minutes",
-            "Lesson Target / Day",
-            "Library Target / Day",
-            "Other Target / Day",
-        ]
-    )
-
-    return (
-        teacher_df,
-        school_df,
-        shared_usage,
-    )
-
+        if teacher_df.empty:
+        return (
+            pd.DataFrame(
+                columns=[
+                    "School",
+                    "Teacher",
+                    "Teacher Key",
+                    "Rostered",
+                    "Status",
+                    "Lesson Delivery",
+                    "Lesson Target",
+                    "Lesson KPI %",
+                    "Library",
+                    "Library Target",
+                    "Library KPI %",
+                    "Other Modules",
+                    "Other Target",
+                    "Other KPI %",
+                    "Total Minutes",
+                    "Active Days",
+                    "Eligible Working Days",
+                    "Books Used",
+                    "Grades Covered",
+                    "Subjects Covered",
+                    "First Activity",
+                    "Last Activity",
+                    "Grade",
+                    "Subject",
+                    "Health Score",
+                ]
+            ),
+            pd.DataFrame(
+                columns=[
+                    "School",
+                    "Teachers",
+                    "Active",
+                    "Inactive / Never Logged In",
+                    "Met All KPIs",
+                    "Overall Compliance %",
+                    "Health Score",
+                    "Lesson Delivery Minutes",
+                    "Library Minutes",
+                    "Other Modules Minutes",
+                    "Lesson Target / Day",
+                    "Library Target / Day",
+                    "Other Target / Day",
+                ]
+            ),
+            shared_usage,
+        )
     schools = []
 
     for school, group in (
