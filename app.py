@@ -1018,221 +1018,334 @@ def render_graphical_school_report(school_row, school_teachers, school_raw, work
 
 
 class ReportPDF(FPDF):
+    """Executive A4 report canvas with predictable margins and restrained branding."""
+
+    NAVY = (15, 23, 42)
+    INDIGO = (79, 70, 229)
+    CYAN = (14, 165, 233)
+    GREEN = (16, 185, 129)
+    AMBER = (245, 158, 11)
+    RED = (239, 68, 68)
+    SLATE = (100, 116, 139)
+    LIGHT = (248, 250, 252)
+    BORDER = (226, 232, 240)
+
     def header(self):
-        bands = [(31,41,55),(49,46,129),(67,56,202),(79,70,229),(59,130,246),(14,165,233)]
-        width = 210 / len(bands)
-        for i, rgb in enumerate(bands):
-            self.set_fill_color(*rgb)
-            self.rect(i * width, 0, width + 0.5, 24, "F")
-        self.set_text_color(255,255,255)
-        self.set_font("Helvetica", "B", 16)
-        self.set_xy(12,6)
-        self.cell(0,7,"AcadIntel 360",0,1)
-        self.set_font("Helvetica", "", 8)
+        # Clean executive band; no full-page rainbow effect.
+        self.set_fill_color(*self.NAVY)
+        self.rect(0, 0, 210, 20, "F")
+        self.set_fill_color(*self.INDIGO)
+        self.rect(0, 20, 210, 2.2, "F")
+        self.set_text_color(255, 255, 255)
+        self.set_font("Helvetica", "B", 15)
+        self.set_xy(12, 5.5)
+        self.cell(0, 6, "AcadIntel 360", 0, 1)
+        self.set_font("Helvetica", "", 7.5)
         self.set_x(12)
-        self.cell(0,4,"Academic Intelligence  |  Evidence  |  Action",0,1)
-        self.set_text_color(31,41,55)
+        self.cell(0, 3.8, "Academic Intelligence | Evidence | Action", 0, 1)
+        self.set_text_color(*self.NAVY)
 
     def footer(self):
-        self.set_y(-11)
-        self.set_draw_color(226,232,240)
+        self.set_y(-10)
+        self.set_draw_color(*self.BORDER)
         self.line(12, self.get_y(), 198, self.get_y())
-        self.set_y(-9)
-        self.set_font("Helvetica", "", 7.5)
-        self.set_text_color(100,116,139)
-        self.cell(0,5,f"Confidential academic implementation report  |  Page {self.page_no()}",0,0,"C")
+        self.set_y(-8.5)
+        self.set_font("Helvetica", "", 7)
+        self.set_text_color(*self.SLATE)
+        self.cell(0, 4, f"Confidential academic implementation report | Page {self.page_no()}", 0, 0, "C")
 
 
 def pdf_safe(value):
     return str(value).encode("latin-1", "replace").decode("latin-1")
 
 
-def pdf_card(pdf, x, y, w, h, label, value, accent=(79,70,229)):
-    pdf.set_fill_color(248,250,252)
-    pdf.set_draw_color(226,232,240)
+def _wrap_pdf_text(pdf, text, width, font="Helvetica", style="", size=7.4):
+    """Return wrapped lines based on actual PDF font metrics."""
+    text = pdf_safe(text or "")
+    pdf.set_font(font, style, size)
+    lines = []
+    for paragraph in text.split("\n"):
+        if paragraph == "":
+            lines.append("")
+            continue
+        words = paragraph.split()
+        current = ""
+        for word in words:
+            candidate = word if not current else current + " " + word
+            if pdf.get_string_width(candidate) <= width:
+                current = candidate
+            else:
+                if current:
+                    lines.append(current)
+                # Handle an exceptionally long token safely.
+                if pdf.get_string_width(word) <= width:
+                    current = word
+                else:
+                    chunk = ""
+                    for ch in word:
+                        cand = chunk + ch
+                        if pdf.get_string_width(cand) <= width:
+                            chunk = cand
+                        else:
+                            if chunk:
+                                lines.append(chunk)
+                            chunk = ch
+                    current = chunk
+        if current:
+            lines.append(current)
+    return lines or [""]
+
+
+def _ensure_space(pdf, required_h, top_y=28):
+    if pdf.get_y() + required_h > 278:
+        pdf.add_page()
+        pdf.set_y(top_y)
+
+
+def pdf_title_block(pdf, title, subtitle=None, eyebrow=None):
+    if eyebrow:
+        pdf.set_font("Helvetica", "B", 7.5)
+        pdf.set_text_color(*ReportPDF.INDIGO)
+        pdf.cell(0, 4, pdf_safe(eyebrow.upper()), 0, 1)
+    pdf.set_font("Helvetica", "B", 18)
+    pdf.set_text_color(*ReportPDF.NAVY)
+    pdf.cell(0, 8, pdf_safe(title), 0, 1)
+    if subtitle:
+        pdf.set_font("Helvetica", "", 8)
+        pdf.set_text_color(*ReportPDF.SLATE)
+        pdf.multi_cell(pdf.epw, 4.2, pdf_safe(subtitle))
+        pdf.set_x(pdf.l_margin)
+    pdf.ln(2)
+
+
+def pdf_card(pdf, x, y, w, h, label, value, accent=None, subtext=None):
+    accent = accent or ReportPDF.INDIGO
+    pdf.set_fill_color(248, 250, 252)
+    pdf.set_draw_color(*ReportPDF.BORDER)
     pdf.rect(x, y, w, h, style="DF", round_corners=True, corner_radius=2.5)
     pdf.set_fill_color(*accent)
     pdf.rect(x, y, 2.2, h, style="F", round_corners=True, corner_radius=1)
-    pdf.set_xy(x+5, y+4)
-    pdf.set_font("Helvetica", "", 7.5)
-    pdf.set_text_color(100,116,139)
-    pdf.cell(w-7,4,pdf_safe(label),0,1)
-    pdf.set_xy(x+5,y+9)
-    pdf.set_font("Helvetica","B",12)
-    pdf.set_text_color(30,41,59)
-    pdf.cell(w-7,7,pdf_safe(str(value)[:22]),0,0)
+    pdf.set_xy(x + 5, y + 4)
+    pdf.set_font("Helvetica", "", 7.2)
+    pdf.set_text_color(*ReportPDF.SLATE)
+    pdf.cell(w - 8, 3.5, pdf_safe(label), 0, 1)
+    pdf.set_xy(x + 5, y + 8.8)
+    pdf.set_font("Helvetica", "B", 12.5)
+    pdf.set_text_color(*ReportPDF.NAVY)
+    pdf.cell(w - 8, 6, pdf_safe(str(value)[:24]), 0, 1)
+    if subtext:
+        pdf.set_xy(x + 5, y + h - 5.5)
+        pdf.set_font("Helvetica", "", 6.5)
+        pdf.set_text_color(*ReportPDF.SLATE)
+        pdf.cell(w - 8, 3.5, pdf_safe(str(subtext)[:38]), 0, 0)
 
 
 def pdf_section_title(pdf, title, subtitle=None):
-    if pdf.get_y() > 260:
-        pdf.add_page(); pdf.ln(17)
-    pdf.set_fill_color(238,242,255)
-    pdf.set_text_color(67,56,202)
-    pdf.set_font("Helvetica","B",10.5)
-    x=pdf.l_margin; y=pdf.get_y()
-    pdf.rect(x,y,pdf.epw,8,style="F", round_corners=True, corner_radius=2)
-    pdf.set_xy(x+4,y+2)
-    pdf.cell(pdf.epw-8,4,pdf_safe(title),0,1)
-    pdf.set_y(y+10)
+    _ensure_space(pdf, 14 if subtitle else 10)
+    x = pdf.l_margin
+    y = pdf.get_y()
+    pdf.set_fill_color(241, 245, 249)
+    pdf.rect(x, y, pdf.epw, 7.5, style="F", round_corners=True, corner_radius=1.8)
+    pdf.set_xy(x + 4, y + 1.8)
+    pdf.set_font("Helvetica", "B", 9.2)
+    pdf.set_text_color(*ReportPDF.NAVY)
+    pdf.cell(pdf.epw - 8, 4, pdf_safe(title.upper()), 0, 1)
+    pdf.set_y(y + 9)
     if subtitle:
-        pdf.set_font("Helvetica","",7.5); pdf.set_text_color(100,116,139)
-        pdf.set_x(x); pdf.multi_cell(pdf.epw,4,pdf_safe(subtitle)); pdf.set_x(x)
+        pdf.set_font("Helvetica", "", 7.1)
+        pdf.set_text_color(*ReportPDF.SLATE)
+        pdf.multi_cell(pdf.epw, 3.8, pdf_safe(subtitle))
+        pdf.set_x(pdf.l_margin)
+        pdf.ln(1)
 
 
-def pdf_progress(pdf, label, pct, x=None, y=None, w=84, show_value=True):
+def pdf_progress(pdf, label, pct, x=None, y=None, w=84, show_value=True, detail=None):
     x = pdf.get_x() if x is None else x
     y = pdf.get_y() if y is None else y
     pct = max(0.0, safe_float(pct))
     capped = min(pct, 100.0)
-    pdf.set_xy(x,y)
-    pdf.set_font("Helvetica","",7.5); pdf.set_text_color(51,65,85)
-    pdf.cell(w,4,pdf_safe(label),0,0)
+    pdf.set_xy(x, y)
+    pdf.set_font("Helvetica", "B", 7.3)
+    pdf.set_text_color(51, 65, 85)
+    pdf.cell(w - 22, 4, pdf_safe(label), 0, 0)
     if show_value:
-        pdf.set_xy(x+w-20,y); pdf.set_font("Helvetica","B",7.5)
-        pdf.cell(20,4,f"{pct:.1f}%",0,0,"R")
-    bar_y=y+5
-    pdf.set_fill_color(226,232,240); pdf.rect(x,bar_y,w,4,style="F", round_corners=True, corner_radius=2)
-    if capped < 40: rgb=(239,68,68)
-    elif capped < 75: rgb=(245,158,11)
-    else: rgb=(16,185,129)
+        pdf.set_xy(x + w - 22, y)
+        pdf.cell(22, 4, f"{pct:.1f}%", 0, 0, "R")
+    bar_y = y + 5
+    pdf.set_fill_color(226, 232, 240)
+    pdf.rect(x, bar_y, w, 3.6, style="F", round_corners=True, corner_radius=1.8)
+    if capped < 40:
+        rgb = ReportPDF.RED
+    elif capped < 75:
+        rgb = ReportPDF.AMBER
+    else:
+        rgb = ReportPDF.GREEN
     pdf.set_fill_color(*rgb)
-    if capped>0: pdf.rect(x,bar_y,max(1,w*capped/100),4,style="F", round_corners=True, corner_radius=2)
-    return bar_y+7
+    if capped > 0:
+        pdf.rect(x, bar_y, max(1, w * capped / 100), 3.6, style="F", round_corners=True, corner_radius=1.8)
+    next_y = bar_y + 5.5
+    if detail:
+        pdf.set_xy(x, next_y)
+        pdf.set_font("Helvetica", "", 6.6)
+        pdf.set_text_color(*ReportPDF.SLATE)
+        pdf.cell(w, 3.5, pdf_safe(detail), 0, 0)
+        next_y += 3.5
+    return next_y
 
 
-def pdf_hbar_chart(pdf, title, rows, max_value=None, height_each=8):
-    pdf_section_title(pdf,title)
+def pdf_hbar_chart(pdf, title, rows, max_value=None, height_each=7, max_rows=10, value_suffix=""):
+    rows = list(rows or [])[:max_rows]
+    needed = 12 + max(1, len(rows)) * height_each
+    _ensure_space(pdf, needed)
+    pdf_section_title(pdf, title)
     if not rows:
-        pdf.set_font("Helvetica","",8); pdf.set_text_color(100,116,139); pdf.cell(0,6,"No measurable data available.",0,1); return
-    max_value = max_value or max(v for _,v in rows) or 1
-    max_value = max(max_value,1)
-    label_w=52; bar_w=110
-    for label,value in rows:
-        if pdf.get_y()>264: pdf.add_page(); pdf.ln(17)
-        y=pdf.get_y()
-        pdf.set_font("Helvetica","",7.2); pdf.set_text_color(51,65,85); pdf.set_xy(pdf.l_margin,y)
-        pdf.cell(label_w,5,pdf_safe(str(label)[:31]),0,0)
-        x=pdf.l_margin+label_w
-        pdf.set_fill_color(241,245,249); pdf.rect(x,y+1,bar_w,4,style="F", round_corners=True, corner_radius=1.5)
-        fill=max(0,min(bar_w,bar_w*safe_float(value)/max_value))
-        pdf.set_fill_color(79,70,229)
-        if fill>0: pdf.rect(x,y+1,max(1,fill),4,style="F", round_corners=True, corner_radius=1.5)
-        pdf.set_xy(x+bar_w+3,y); pdf.set_font("Helvetica","B",7.2); pdf.cell(18,5,f"{safe_float(value):.1f}",0,0,"R")
-        pdf.set_y(y+height_each)
+        pdf.set_font("Helvetica", "", 8)
+        pdf.set_text_color(*ReportPDF.SLATE)
+        pdf.cell(0, 6, "No measurable data available.", 0, 1)
+        return
+    max_value = max_value or max(safe_float(v) for _, v in rows) or 1
+    max_value = max(max_value, 1)
+    label_w = 54
+    value_w = 20
+    bar_w = pdf.epw - label_w - value_w - 5
+    for label, value in rows:
+        y = pdf.get_y()
+        pdf.set_font("Helvetica", "", 7)
+        pdf.set_text_color(51, 65, 85)
+        pdf.set_xy(pdf.l_margin, y)
+        pdf.cell(label_w, 4.5, pdf_safe(str(label)[:34]), 0, 0)
+        x = pdf.l_margin + label_w
+        pdf.set_fill_color(241, 245, 249)
+        pdf.rect(x, y + 0.7, bar_w, 3.6, style="F", round_corners=True, corner_radius=1.4)
+        fill = max(0, min(bar_w, bar_w * safe_float(value) / max_value))
+        pdf.set_fill_color(*ReportPDF.INDIGO)
+        if fill > 0:
+            pdf.rect(x, y + 0.7, max(1, fill), 3.6, style="F", round_corners=True, corner_radius=1.4)
+        pdf.set_xy(x + bar_w + 2, y)
+        pdf.set_font("Helvetica", "B", 7)
+        pdf.cell(value_w - 2, 4.5, f"{safe_float(value):.1f}{value_suffix}", 0, 0, "R")
+        pdf.set_y(y + height_each)
 
 
-def pdf_note_box(pdf, title, body, kind="info"):
-    palette={"info":((239,246,255),(37,99,235)),"success":((240,253,244),(22,163,74)),"warning":((255,247,237),(234,88,12)),"purple":((245,243,255),(124,58,237))}
-    bg,accent=palette.get(kind,palette["info"])
-    body=pdf_safe(body)
-    lines=max(2, len(body)//95 + body.count("\n") + 1)
-    h=min(38,10+lines*4.2)
-    if pdf.get_y()+h>270: pdf.add_page(); pdf.ln(17)
-    x=pdf.l_margin; y=pdf.get_y()
-    pdf.set_fill_color(*bg); pdf.set_draw_color(*accent); pdf.rect(x,y,pdf.epw,h,style="DF", round_corners=True, corner_radius=2.5)
-    pdf.set_fill_color(*accent); pdf.rect(x,y,2,h,style="F", round_corners=True, corner_radius=1)
-    pdf.set_xy(x+5,y+3); pdf.set_text_color(*accent); pdf.set_font("Helvetica","B",8.5); pdf.cell(pdf.epw-10,4,pdf_safe(title),0,1)
-    pdf.set_xy(x+5,y+8); pdf.set_text_color(51,65,85); pdf.set_font("Helvetica","",7.5); pdf.multi_cell(pdf.epw-10,4,pdf_safe(body)); pdf.set_y(y+h+3)
+def pdf_note_box(pdf, title, body, kind="info", max_lines=None):
+    """Measured note box: never clips or overlaps the next section."""
+    palette = {
+        "info": ((239, 246, 255), (37, 99, 235)),
+        "success": ((240, 253, 244), (22, 163, 74)),
+        "warning": ((255, 247, 237), (234, 88, 12)),
+        "purple": ((245, 243, 255), (124, 58, 237)),
+        "neutral": ((248, 250, 252), (71, 85, 105)),
+    }
+    bg, accent = palette.get(kind, palette["info"])
+    inner_w = pdf.epw - 12
+    lines = _wrap_pdf_text(pdf, body, inner_w, size=7.2)
+    if max_lines:
+        lines = lines[:max_lines]
+    line_h = 3.65
+    h = 11 + len(lines) * line_h
+    _ensure_space(pdf, h + 3)
+    x = pdf.l_margin
+    y = pdf.get_y()
+    pdf.set_fill_color(*bg)
+    pdf.set_draw_color(*accent)
+    pdf.rect(x, y, pdf.epw, h, style="DF", round_corners=True, corner_radius=2.2)
+    pdf.set_fill_color(*accent)
+    pdf.rect(x, y, 2.1, h, style="F", round_corners=True, corner_radius=1)
+    pdf.set_xy(x + 5, y + 3)
+    pdf.set_text_color(*accent)
+    pdf.set_font("Helvetica", "B", 8.2)
+    pdf.cell(pdf.epw - 10, 4, pdf_safe(title), 0, 1)
+    pdf.set_text_color(51, 65, 85)
+    pdf.set_font("Helvetica", "", 7.2)
+    ty = y + 8.5
+    for line in lines:
+        pdf.set_xy(x + 5, ty)
+        pdf.cell(inner_w, line_h, pdf_safe(line), 0, 0)
+        ty += line_h
+    pdf.set_y(y + h + 3)
+
+
+def pdf_table(pdf, headers, rows, widths, aligns=None, header_fill=(241,245,249), font_size=7.0, row_h=5.2):
+    """Simple executive table with predictable pagination."""
+    aligns = aligns or ["L"] * len(headers)
+    _ensure_space(pdf, row_h * 3 + 5)
+    x0 = pdf.l_margin
+    pdf.set_fill_color(*header_fill)
+    pdf.set_draw_color(*ReportPDF.BORDER)
+    pdf.set_font("Helvetica", "B", font_size)
+    pdf.set_text_color(*ReportPDF.NAVY)
+    for i, (h, w) in enumerate(zip(headers, widths)):
+        pdf.cell(w, row_h, pdf_safe(h), 1, 0, aligns[i], True)
+    pdf.ln(row_h)
+    pdf.set_font("Helvetica", "", font_size)
+    pdf.set_text_color(51, 65, 85)
+    for row in rows:
+        if pdf.get_y() + row_h > 276:
+            pdf.add_page(); pdf.set_y(28)
+            pdf.set_x(x0)
+            pdf.set_fill_color(*header_fill)
+            pdf.set_font("Helvetica", "B", font_size)
+            pdf.set_text_color(*ReportPDF.NAVY)
+            for i, (h, w) in enumerate(zip(headers, widths)):
+                pdf.cell(w, row_h, pdf_safe(h), 1, 0, aligns[i], True)
+            pdf.ln(row_h)
+            pdf.set_font("Helvetica", "", font_size)
+            pdf.set_text_color(51, 65, 85)
+        pdf.set_x(x0)
+        for i, (val, w) in enumerate(zip(row, widths)):
+            txt = pdf_safe(val)
+            if pdf.get_string_width(txt) > w - 2:
+                while len(txt) > 3 and pdf.get_string_width(txt + "...") > w - 2:
+                    txt = txt[:-1]
+                txt += "..."
+            pdf.cell(w, row_h, txt, 1, 0, aligns[i])
+        pdf.ln(row_h)
 
 
 def add_signature(pdf, signature_name="Dilip Kumar Vishwakarma"):
-    if pdf.get_y()>245: pdf.add_page(); pdf.ln(17)
-    pdf.ln(4)
-    pdf.set_draw_color(203,213,225); pdf.line(pdf.l_margin,pdf.get_y(),pdf.l_margin+70,pdf.get_y())
+    _ensure_space(pdf, 22)
     pdf.ln(3)
-    pdf.set_font("Helvetica","B",9); pdf.set_text_color(31,41,55); pdf.cell(0,5,pdf_safe(signature_name),0,1)
-    pdf.set_font("Helvetica","",7.5); pdf.set_text_color(100,116,139); pdf.cell(0,4,"Academic Consultant | OneLern Academic Team",0,1)
+    y = pdf.get_y()
+    pdf.set_draw_color(203, 213, 225)
+    pdf.line(pdf.l_margin, y, pdf.l_margin + 62, y)
+    pdf.set_y(y + 2)
+    pdf.set_font("Helvetica", "B", 8.8)
+    pdf.set_text_color(*ReportPDF.NAVY)
+    pdf.cell(0, 4.6, pdf_safe(signature_name), 0, 1)
+    pdf.set_font("Helvetica", "", 7.2)
+    pdf.set_text_color(*ReportPDF.SLATE)
+    pdf.cell(0, 4, "Academic Consultant | OneLern Academic Team", 0, 1)
 
 
-def add_teacher_report_page(pdf, row, evidence, start_date, end_date, action_days):
-    pdf.add_page(); pdf.ln(17)
-    pdf.set_text_color(15,23,42); pdf.set_font("Helvetica","B",16)
-    pdf.cell(0,8,pdf_safe(row.get("Teacher","Teacher 360")),0,1)
-    pdf.set_font("Helvetica","",8); pdf.set_text_color(100,116,139)
-    pdf.cell(0,5,pdf_safe(f"Teacher 360 | {row.get('School','')} | {start_date} to {end_date}"),0,1)
-    pdf.ln(3)
-
-    y=pdf.get_y(); gap=3; w=(pdf.epw-gap*3)/4
-    cards=[
-        ("Health",f"{safe_float(row.get('Health Score')):.0f}/100",(79,70,229)),
-        ("Active Days",f"{int(safe_float(row.get('Active Days')))}/{int(safe_float(row.get('Eligible Working Days')))}",(14,165,233)),
-        ("Total Usage",f"{safe_float(row.get('Total Minutes')):.1f} min",(16,185,129)),
-        ("Status",str(row.get('Status','')), (245,158,11)),
+def teacher_math_components(row):
+    workdays = max(0, int(safe_float(row.get("Eligible Working Days"))))
+    active_days = max(0, int(safe_float(row.get("Active Days"))))
+    consistency = min((active_days / workdays * 100), 100) if workdays else 0
+    items = [
+        ("Lesson Delivery", safe_float(row.get("Lesson KPI %")), 40.0),
+        ("Library", safe_float(row.get("Library KPI %")), 35.0),
+        ("Other Modules", safe_float(row.get("Other KPI %")), 15.0),
+        ("Consistency", consistency, 10.0),
     ]
-    for i,(lab,val,acc) in enumerate(cards): pdf_card(pdf,pdf.l_margin+i*(w+gap),y,w,19,lab,val,acc)
-    pdf.set_y(y+24)
-
-    pdf_section_title(pdf,"KPI SCORECARD","Configured KPI achievement for the selected review period")
-    y=pdf.get_y()
-    y=pdf_progress(pdf,"Lesson Delivery",row.get("Lesson KPI %"),pdf.l_margin,y,pdf.epw)
-    y=pdf_progress(pdf,"Library",row.get("Library KPI %"),pdf.l_margin,y+2,pdf.epw)
-    y=pdf_progress(pdf,"Other Modules",row.get("Other KPI %"),pdf.l_margin,y+2,pdf.epw)
-    pdf.set_y(y+4)
-
-    pdf_note_box(
-        pdf,
-        "Mathematics behind this Teacher Health Score",
-        teacher_math_explanation(row),
-        "purple",
-    )
-
-    diagnosis,strength,focus,plan=teacher_auto_insights(row,action_days)
-    pdf_note_box(pdf,"Performance diagnosis",diagnosis,"info")
-    pdf_note_box(pdf,"Relative strength",strength,"success")
-    pdf_note_box(pdf,"Priority focus",focus,"warning")
-
-    if evidence is not None and not evidence.empty:
-        module_rows=evidence.groupby("Raw Module")["Minutes"].sum().sort_values(ascending=False).head(8)
-        pdf_hbar_chart(pdf,"MODULE UTILISATION",[(str(k),safe_float(v)) for k,v in module_rows.items()])
-        daily=evidence.dropna(subset=["DateTime"]).copy()
-        if not daily.empty:
-            daily["_day"]=daily["DateTime"].dt.strftime("%d %b")
-            d=daily.groupby("_day",sort=False)["Minutes"].sum().tail(12)
-            pdf_hbar_chart(pdf,"RECENT ACTIVITY DAYS",[(str(k),safe_float(v)) for k,v in d.items()])
-
-    pdf_note_box(pdf,f"{action_days}-day development plan",plan,"purple")
-    pdf_note_box(pdf,"Closing note","The next review should compare the same verified KPIs, active-day consistency and content breadth. Improvement should be recognised where evidence confirms progress.","success")
-    add_signature(pdf)
-
+    out = []
+    total = 0
+    for label, achieved, weight in items:
+        contribution = min(max(achieved, 0), 100) * weight / 100
+        total += contribution
+        out.append((label, achieved, weight, contribution))
+    return out, total, consistency
 
 
 def teacher_math_explanation(row):
-    workdays = max(0, int(safe_float(row.get("Eligible Working Days"))))
-    active_days = max(0, int(safe_float(row.get("Active Days"))))
-
-    lesson_actual = safe_float(row.get("Lesson Delivery"))
-    lesson_target = safe_float(row.get("Lesson Target"))
-    lesson_pct = safe_float(row.get("Lesson KPI %"))
-
-    library_actual = safe_float(row.get("Library"))
-    library_target = safe_float(row.get("Library Target"))
-    library_pct = safe_float(row.get("Library KPI %"))
-
-    other_actual = safe_float(row.get("Other Modules"))
-    other_target = safe_float(row.get("Other Target"))
-    other_pct = safe_float(row.get("Other KPI %"))
-
-    consistency = min((active_days / workdays * 100), 100) if workdays > 0 else 0
-    health = safe_float(row.get("Health Score"))
-
+    components, total, consistency = teacher_math_components(row)
+    workdays = int(safe_float(row.get("Eligible Working Days")))
+    active = int(safe_float(row.get("Active Days")))
     return (
-        "HOW THIS TEACHER HEALTH SCORE IS CALCULATED\n"
-        f"1. Lesson Delivery KPI % = Actual / Target x 100 = "
-        f"{lesson_actual:.1f} / {lesson_target:.1f} x 100 = {lesson_pct:.1f}%.\n"
-        f"2. Library KPI % = Actual / Target x 100 = "
-        f"{library_actual:.1f} / {library_target:.1f} x 100 = {library_pct:.1f}%.\n"
-        f"3. Other Modules KPI % = Actual / Target x 100 = "
-        f"{other_actual:.1f} / {other_target:.1f} x 100 = {other_pct:.1f}%.\n"
-        f"4. Consistency % = Active Days / Eligible Working Days x 100 = "
-        f"{active_days} / {workdays} x 100 = {consistency:.1f}%.\n"
-        "5. Teacher Health Score = "
-        "[min(Lesson KPI %, 100) x 40%] + "
-        "[min(Library KPI %, 100) x 35%] + "
-        "[min(Other Modules KPI %, 100) x 15%] + "
-        "[Consistency % x 10%].\n"
-        f"Using the verified values above, the final rounded Teacher Health Score = {health:.0f}/100.\n"
-        "Important: KPI percentages are capped at 100% only for the Health Score calculation, "
-        "so over-performance in one module cannot fully compensate for under-performance in another."
+        "Teacher Health combines KPI achievement and activity consistency. "
+        "Weights: Lesson Delivery 40%, Library 35%, Other Modules 15%, Consistency 10%. "
+        "Each component is capped at 100% before weighting. "
+        f"Consistency = {active}/{workdays} x 100 = {consistency:.1f}%. "
+        f"Weighted total = {total:.2f}, rounded to {safe_float(row.get('Health Score')):.0f}/100."
     )
 
 
@@ -1242,150 +1355,300 @@ def school_math_explanation(school_row, teacher_data, workdays):
     met_all = max(0, int(safe_float(school_row.get("Met All KPIs"))))
     compliance = safe_float(school_row.get("Overall Compliance %"))
     health = safe_float(school_row.get("Health Score"))
-
     if teacher_data is not None and not teacher_data.empty:
-        scores = [
-            int(round(safe_float(v)))
-            for v in teacher_data["Health Score"].tolist()
-        ]
+        scores = [safe_float(v) for v in teacher_data["Health Score"].tolist()]
         score_sum = sum(scores)
-        score_text = " + ".join(str(v) for v in scores)
-        average_text = (
-            f"({score_text}) / {len(scores)} = "
-            f"{score_sum} / {len(scores)} = {score_sum / len(scores):.2f}, "
-            f"rounded to {health:.0f}/100."
-        )
+        average_text = f"sum of Teacher Health Scores {score_sum:.0f} / {len(scores)} teachers = {score_sum / len(scores):.2f}, rounded to {health:.0f}/100"
     else:
-        average_text = "No teacher-level Health Scores are available for this review period."
-
+        average_text = "no teacher-level Health Scores were available"
     return (
-        "HOW THE INSTITUTIONAL NUMBERS ARE CALCULATED\n"
-        "Institution Health is the arithmetic mean of the individual Teacher Health Scores.\n"
-        f"Current calculation: {average_text}\n\n"
-        "Full KPI Compliance % = Teachers meeting ALL THREE KPI targets / Total Teachers x 100.\n"
-        f"Current calculation: {met_all} / {total} x 100 = {compliance:.1f}%.\n\n"
-        "Active Teachers = teachers with recorded usage greater than 0 minutes during the selected review period.\n"
-        f"Current result: {active}/{total} active teachers.\n\n"
-        "Met All KPIs = number of teachers whose Lesson Delivery KPI %, Library KPI %, "
-        "and Other Modules KPI % are each at least 100%.\n"
-        f"Current result: {met_all} teacher(s).\n\n"
-        f"Eligible working days used for KPI targets in this report: {workdays}. Sundays are excluded unless a working-day override is used."
+        f"Institution Health = {average_text}. "
+        f"Full KPI Compliance = {met_all}/{total} x 100 = {compliance:.1f}%. "
+        f"Active Teachers = {active}/{total} with recorded usage above 0 minutes. "
+        "Met All KPIs counts teachers whose Lesson Delivery, Library and Other Modules are all at least 100%. "
+        f"Eligible working days used in this report: {workdays}."
     )
 
 
 def kpi_target_math_explanation(school_row, workdays, teacher_count):
     school_name = str(school_row.get("School") or "").strip()
     scope = kpi_scope_details(school_name if school_name else None)
-
-    ld_daily = safe_float(school_row.get("Lesson Target / Day"))
-    lib_daily = safe_float(school_row.get("Library Target / Day"))
-    other_daily = safe_float(school_row.get("Other Target / Day"))
-
+    ld = safe_float(school_row.get("Lesson Target / Day"))
+    lib = safe_float(school_row.get("Library Target / Day"))
+    oth = safe_float(school_row.get("Other Target / Day"))
     return (
-        "KPI TARGET MATHEMATICS\n"
-        f"Lesson Delivery daily benchmark: {ld_daily:.1f} min/day "
-        f"({scope['source']['lessonDelivery']}).\n"
-        f"Library daily benchmark: {lib_daily:.1f} min/day "
-        f"({scope['source']['library']}).\n"
-        f"Other Modules daily benchmark: {other_daily:.1f} min/day "
-        f"({scope['source']['otherModules']}).\n\n"
-        "Teacher review-period target = Daily KPI target x Eligible Working Days.\n"
-        f"Lesson Delivery: {ld_daily:.1f} x {workdays} = {ld_daily * workdays:.1f} min per teacher.\n"
-        f"Library: {lib_daily:.1f} x {workdays} = {lib_daily * workdays:.1f} min per teacher.\n"
-        f"Other Modules: {other_daily:.1f} x {workdays} = {other_daily * workdays:.1f} min per teacher.\n\n"
-        "Institutional cumulative target is calculated automatically; it is not a separate KPI setting.\n"
-        "Formula = Per-teacher review target x Number of teachers included in the report.\n"
-        f"Lesson Delivery school target: {ld_daily:.1f} x {workdays} x {teacher_count} = {ld_daily * workdays * teacher_count:.1f} min.\n"
-        f"Library school target: {lib_daily:.1f} x {workdays} x {teacher_count} = {lib_daily * workdays * teacher_count:.1f} min.\n"
-        f"Other Modules school target: {other_daily:.1f} x {workdays} x {teacher_count} = {other_daily * workdays * teacher_count:.1f} min."
+        f"Effective daily benchmarks - Lesson Delivery {ld:.1f} min/day ({scope['source']['lessonDelivery']}), "
+        f"Library {lib:.1f} min/day ({scope['source']['library']}), Other Modules {oth:.1f} min/day ({scope['source']['otherModules']}). "
+        "Per-teacher review target = daily benchmark x eligible working days. "
+        "Institution target = per-teacher review target x included teachers. "
+        f"For {workdays} days and {teacher_count} teachers: Lesson {ld*workdays*teacher_count:.1f} min, "
+        f"Library {lib*workdays*teacher_count:.1f} min, Other Modules {oth*workdays*teacher_count:.1f} min."
     )
 
+
+def teacher_auto_insights(row, action_days=7):
+    # preserve deterministic, auditable insights
+    lesson = safe_float(row.get("Lesson KPI %"))
+    library = safe_float(row.get("Library KPI %"))
+    other = safe_float(row.get("Other KPI %"))
+    total = safe_float(row.get("Total Minutes"))
+    active = int(safe_float(row.get("Active Days")))
+    workdays = max(1, int(safe_float(row.get("Eligible Working Days"))))
+    consistency = active / workdays * 100
+    metrics = {"Lesson Delivery": lesson, "Library": library, "Other Modules": other}
+    strongest = max(metrics, key=metrics.get)
+    weakest = min(metrics, key=metrics.get)
+    diagnosis = f"{total:.1f} minutes recorded across {active}/{workdays} active days ({consistency:.1f}% consistency)."
+    strength = f"Strongest relative adoption: {strongest} at {metrics[strongest]:.1f}% of configured KPI."
+    focus = f"Primary implementation gap: {weakest} at {metrics[weakest]:.1f}% of configured KPI."
+    plan = (
+        f"Next {action_days} days: establish a daily usage rhythm, prioritise {weakest}, "
+        "use the relevant classroom/content workflow, and review the same KPI denominator at the next checkpoint."
+    )
+    return diagnosis, strength, focus, plan
+
+
+def _teacher_status_counts(teacher_data):
+    if teacher_data is None or teacher_data.empty:
+        return []
+    counts = teacher_data["Status"].value_counts()
+    order = ["Meeting All KPIs", "Partially Meeting", "Below KPI", "Never Logged In", "0 Usage"]
+    return [(name, int(counts.get(name, 0))) for name in order if int(counts.get(name, 0)) > 0]
+
+
+def _school_priority_text(teacher_data):
+    if teacher_data is None or teacher_data.empty:
+        return "No teacher-level evidence available for prioritisation."
+    priority = teacher_data.sort_values(["Health Score", "Total Minutes"]).head(4)
+    parts = []
+    for _, r in priority.iterrows():
+        kpis = {
+            "Lesson Delivery": safe_float(r.get("Lesson KPI %")),
+            "Library": safe_float(r.get("Library KPI %")),
+            "Other Modules": safe_float(r.get("Other KPI %")),
+        }
+        weak = min(kpis, key=kpis.get)
+        parts.append(f"{r.get('Teacher')}: {weak} {kpis[weak]:.1f}%, health {safe_float(r.get('Health Score')):.0f}/100")
+    return "; ".join(parts) + "."
+
+
+def add_teacher_report_page(pdf, row, evidence, start_date, end_date, action_days, signature_name="Dilip Kumar Vishwakarma"):
+    """One executive page per teacher. Dense mathematics is moved into a compact contribution table."""
+    pdf.add_page()
+    pdf.set_y(28)
+    pdf_title_block(
+        pdf,
+        str(row.get("Teacher", "Teacher 360")),
+        f"Teacher 360 | {row.get('School','')} | {start_date} to {end_date}",
+        "Teacher implementation profile",
+    )
+
+    y = pdf.get_y(); gap = 3; w = (pdf.epw - gap * 3) / 4
+    cards = [
+        ("Health", f"{safe_float(row.get('Health Score')):.0f}/100", ReportPDF.INDIGO, "Weighted implementation score"),
+        ("Active Days", f"{int(safe_float(row.get('Active Days')))}/{int(safe_float(row.get('Eligible Working Days')))}", ReportPDF.CYAN, "Usage-day consistency"),
+        ("Total Usage", f"{safe_float(row.get('Total Minutes')):.1f} min", ReportPDF.GREEN, "Selected review period"),
+        ("Status", str(row.get('Status','')), ReportPDF.AMBER, "Against configured KPIs"),
+    ]
+    for i, (lab, val, acc, sub) in enumerate(cards):
+        pdf_card(pdf, pdf.l_margin + i * (w + gap), y, w, 21, lab, val, acc, sub)
+    pdf.set_y(y + 25)
+
+    pdf_section_title(pdf, "KPI scorecard", "Actual achievement against this teacher's configured review-period targets")
+    y = pdf.get_y()
+    y = pdf_progress(pdf, "Lesson Delivery", row.get("Lesson KPI %"), pdf.l_margin, y, pdf.epw,
+                     detail=f"{safe_float(row.get('Lesson Delivery')):.1f} / {safe_float(row.get('Lesson Target')):.1f} min")
+    y = pdf_progress(pdf, "Library", row.get("Library KPI %"), pdf.l_margin, y + 1, pdf.epw,
+                     detail=f"{safe_float(row.get('Library')):.1f} / {safe_float(row.get('Library Target')):.1f} min")
+    y = pdf_progress(pdf, "Other Modules", row.get("Other KPI %"), pdf.l_margin, y + 1, pdf.epw,
+                     detail=f"{safe_float(row.get('Other Modules')):.1f} / {safe_float(row.get('Other Target')):.1f} min")
+    pdf.set_y(y + 2)
+
+    components, total_calc, consistency = teacher_math_components(row)
+    pdf_section_title(pdf, "Health score mathematics", "Transparent weighted calculation - capped at 100% per component")
+    rows = [(label, f"{ach:.1f}%", f"{weight:.0f}%", f"{contrib:.2f}") for label, ach, weight, contrib in components]
+    rows.append(("TOTAL", "", "", f"{total_calc:.2f} -> {safe_float(row.get('Health Score')):.0f}/100"))
+    pdf_table(pdf, ["Component", "Achievement", "Weight", "Contribution"], rows, [62, 38, 28, 58], ["L","R","R","R"], font_size=6.9, row_h=4.9)
+    pdf.ln(2)
+
+    diagnosis, strength, focus, plan = teacher_auto_insights(row, action_days)
+    # Two-column executive insight organizer
+    _ensure_space(pdf, 31)
+    x = pdf.l_margin; y0 = pdf.get_y(); gap = 3; col = (pdf.epw - gap) / 2
+    pdf.set_xy(x, y0)
+    _mini_box(pdf, x, y0, col, 27, "WHAT THE DATA SAYS", diagnosis + " " + strength, "info")
+    _mini_box(pdf, x + col + gap, y0, col, 27, "PRIORITY ACTION", focus + " " + plan, "warning")
+    pdf.set_y(y0 + 31)
+
+    if evidence is not None and not evidence.empty:
+        # Compact top modules only; raw evidence remains available in app.
+        modules = evidence.groupby("Raw Module")["Minutes"].sum().sort_values(ascending=False).head(5)
+        pdf_hbar_chart(pdf, "Top module utilisation", [(str(k), safe_float(v)) for k, v in modules.items()], max_rows=5, height_each=6.2)
+
+    pdf_note_box(
+        pdf,
+        "Closing note",
+        "At the next review, compare the same KPI percentages, active-day consistency and content breadth. Recognise verified improvement and agree a measurable commitment for any persistent gap.",
+        "success",
+        max_lines=4,
+    )
+
+    # Keep each Teacher 360 profile self-contained on one page.
+    # A compact sign-off is anchored above the footer rather than triggering a new page.
+    sig_y = 263
+    pdf.set_draw_color(203, 213, 225)
+    pdf.line(pdf.l_margin, sig_y, pdf.l_margin + 52, sig_y)
+    pdf.set_xy(pdf.l_margin, sig_y + 1.8)
+    pdf.set_font("Helvetica", "B", 7.8)
+    pdf.set_text_color(*ReportPDF.NAVY)
+    pdf.cell(70, 4, pdf_safe(signature_name), 0, 1)
+    pdf.set_x(pdf.l_margin)
+    pdf.set_font("Helvetica", "", 6.5)
+    pdf.set_text_color(*ReportPDF.SLATE)
+    pdf.cell(90, 3.5, "Academic Consultant | OneLern Academic Team", 0, 1)
+
+
+def _mini_box(pdf, x, y, w, h, title, body, kind="info"):
+    palette = {
+        "info": ((239,246,255),(37,99,235)),
+        "success": ((240,253,244),(22,163,74)),
+        "warning": ((255,247,237),(234,88,12)),
+        "purple": ((245,243,255),(124,58,237)),
+    }
+    bg, accent = palette.get(kind, palette["info"])
+    pdf.set_fill_color(*bg); pdf.set_draw_color(*ReportPDF.BORDER)
+    pdf.rect(x, y, w, h, style="DF", round_corners=True, corner_radius=2.2)
+    pdf.set_fill_color(*accent); pdf.rect(x, y, 2, h, "F")
+    pdf.set_xy(x+5, y+3); pdf.set_font("Helvetica","B",7.6); pdf.set_text_color(*accent)
+    pdf.cell(w-9,4,pdf_safe(title),0,1)
+    lines = _wrap_pdf_text(pdf, body, w-10, size=6.8)[:5]
+    ty=y+8.3; pdf.set_font("Helvetica","",6.8); pdf.set_text_color(51,65,85)
+    for line in lines:
+        pdf.set_xy(x+5,ty); pdf.cell(w-10,3.3,pdf_safe(line),0,0); ty += 3.3
 
 
 def make_premium_school_pack_pdf(school_row, teacher_data, raw_school, start_date, end_date, workdays, action_days=7, ai_text="", signature_name="Dilip Kumar Vishwakarma"):
-    pdf=ReportPDF(); pdf.set_auto_page_break(True,14); pdf.set_margins(12,12,12)
-    pdf.add_page(); pdf.ln(17)
-    school=str(school_row.get("School","School"))
-    pdf.set_font("Helvetica","B",18); pdf.set_text_color(15,23,42); pdf.cell(0,9,pdf_safe("School 360 Intelligence Report"),0,1)
-    pdf.set_font("Helvetica","B",12); pdf.set_text_color(67,56,202); pdf.cell(0,7,pdf_safe(school),0,1)
-    pdf.set_font("Helvetica","",8); pdf.set_text_color(100,116,139); pdf.cell(0,5,pdf_safe(f"Review period: {start_date} to {end_date}  |  Working days: {workdays}  |  Teacher reports included: {len(teacher_data)}"),0,1)
-    pdf.ln(3)
+    """Executive pack: 2 school pages + one self-contained page per teacher."""
+    pdf = ReportPDF()
+    pdf.set_auto_page_break(True, 14)
+    pdf.set_margins(12, 12, 12)
 
-    y=pdf.get_y(); gap=3; w=(pdf.epw-gap*3)/4
-    school_cards=[
-        ("Health Score",f"{safe_float(school_row.get('Health Score')):.0f}/100",(79,70,229)),
-        ("Full Compliance",f"{safe_float(school_row.get('Overall Compliance %')):.1f}%",(14,165,233)),
-        ("Active Teachers",f"{int(safe_float(school_row.get('Active')))}/{int(safe_float(school_row.get('Teachers')))}",(16,185,129)),
-        ("Met All KPIs",str(int(safe_float(school_row.get('Met All KPIs')))),(245,158,11)),
+    # ---------------- PAGE 1: EXECUTIVE COCKPIT ----------------
+    pdf.add_page(); pdf.set_y(28)
+    school = str(school_row.get("School", "School"))
+    pdf_title_block(
+        pdf,
+        "School 360 Intelligence Report",
+        f"{school} | Review period {start_date} to {end_date} | {workdays} eligible working days | {len(teacher_data)} teacher profiles",
+        "Executive implementation brief",
+    )
+
+    y = pdf.get_y(); gap = 3; w = (pdf.epw - gap * 3) / 4
+    school_cards = [
+        ("Institution Health", f"{safe_float(school_row.get('Health Score')):.0f}/100", ReportPDF.INDIGO, "Average teacher health"),
+        ("Full KPI Compliance", f"{safe_float(school_row.get('Overall Compliance %')):.1f}%", ReportPDF.CYAN, "Met all 3 KPIs"),
+        ("Active Teachers", f"{int(safe_float(school_row.get('Active')))}/{int(safe_float(school_row.get('Teachers')))}", ReportPDF.GREEN, "Usage above 0 min"),
+        ("Met All KPIs", str(int(safe_float(school_row.get('Met All KPIs')))), ReportPDF.AMBER, "Teacher count"),
     ]
-    for i,(lab,val,acc) in enumerate(school_cards): pdf_card(pdf,pdf.l_margin+i*(w+gap),y,w,19,lab,val,acc)
-    pdf.set_y(y+24)
+    for i, (lab, val, acc, sub) in enumerate(school_cards):
+        pdf_card(pdf, pdf.l_margin + i * (w + gap), y, w, 21, lab, val, acc, sub)
+    pdf.set_y(y + 25)
 
-    teacher_count=max(1,int(safe_float(school_row.get("Teachers"))))
-    targets={
-        "Lesson Delivery":safe_float(school_row.get("Lesson Target / Day"))*workdays*teacher_count,
-        "Library":safe_float(school_row.get("Library Target / Day"))*workdays*teacher_count,
-        "Other Modules":safe_float(school_row.get("Other Target / Day"))*workdays*teacher_count,
+    teacher_count = max(1, int(safe_float(school_row.get("Teachers"))))
+    targets = {
+        "Lesson Delivery": safe_float(school_row.get("Lesson Target / Day")) * workdays * teacher_count,
+        "Library": safe_float(school_row.get("Library Target / Day")) * workdays * teacher_count,
+        "Other Modules": safe_float(school_row.get("Other Target / Day")) * workdays * teacher_count,
     }
-    actuals={
-        "Lesson Delivery":safe_float(school_row.get("Lesson Delivery Minutes")),
-        "Library":safe_float(school_row.get("Library Minutes")),
-        "Other Modules":safe_float(school_row.get("Other Modules Minutes")),
+    actuals = {
+        "Lesson Delivery": safe_float(school_row.get("Lesson Delivery Minutes")),
+        "Library": safe_float(school_row.get("Library Minutes")),
+        "Other Modules": safe_float(school_row.get("Other Modules Minutes")),
     }
-    pdf_section_title(pdf,"INSTITUTIONAL KPI SCORECARD","Actual usage against configured cumulative school targets")
-    y=pdf.get_y()
-    for label in ["Lesson Delivery","Library","Other Modules"]:
-        pct=actuals[label]/targets[label]*100 if targets[label] else 0
-        y=pdf_progress(pdf,f"{label}  {actuals[label]:.1f}/{targets[label]:.1f} min",pct,pdf.l_margin,y,pdf.epw)
-        y+=2
-    pdf.set_y(y+2)
+    pdf_section_title(pdf, "Institutional KPI scorecard", "Actual usage against cumulative configured school targets")
+    y = pdf.get_y()
+    for label in ["Lesson Delivery", "Library", "Other Modules"]:
+        pct = actuals[label] / targets[label] * 100 if targets[label] else 0
+        y = pdf_progress(pdf, label, pct, pdf.l_margin, y, pdf.epw,
+                         detail=f"Actual {actuals[label]:.1f} min | Target {targets[label]:.1f} min")
+        y += 1
+    pdf.set_y(y + 2)
 
-    pdf_note_box(
-        pdf,
-        "How the KPI targets are derived",
-        kpi_target_math_explanation(school_row, workdays, teacher_count),
-        "info",
-    )
-    pdf_note_box(
-        pdf,
-        "How the Institution Health and compliance figures are derived",
-        school_math_explanation(school_row, teacher_data, workdays),
-        "purple",
-    )
+    # Teacher status distribution and priority in two columns.
+    _ensure_space(pdf, 42)
+    status_rows = _teacher_status_counts(teacher_data)
+    x = pdf.l_margin; y0 = pdf.get_y(); gap = 4; col = (pdf.epw-gap)/2
+    _mini_box(pdf, x, y0, col, 36, "IMPLEMENTATION SIGNAL", school_math_explanation(school_row, teacher_data, workdays), "info")
+    _mini_box(pdf, x+col+gap, y0, col, 36, "PRIORITY TEACHERS", _school_priority_text(teacher_data), "warning")
+    pdf.set_y(y0+40)
 
     if not teacher_data.empty:
-        health=teacher_data.sort_values("Health Score",ascending=False).head(12)
-        pdf_hbar_chart(pdf,"TEACHER HEALTH RANKING",[(str(r["Teacher"]),safe_float(r["Health Score"])) for _,r in health.iterrows()],max_value=100)
+        health = teacher_data.sort_values("Health Score", ascending=False).head(8)
+        pdf_hbar_chart(pdf, "Teacher health ranking", [(str(r["Teacher"]), safe_float(r["Health Score"])) for _, r in health.iterrows()], max_value=100, max_rows=8, height_each=6.2)
+
+    # ---------------- PAGE 2: METHODOLOGY + ACTION ----------------
+    pdf.add_page(); pdf.set_y(28)
+    pdf_title_block(pdf, "Executive Interpretation & Methodology", f"{school} | Transparent calculations, adoption pattern and next actions", "Decision support")
+
+    # Compact target table replaces oversized narrative boxes.
+    scope = kpi_scope_details(school)
+    ld = safe_float(school_row.get("Lesson Target / Day")); lib = safe_float(school_row.get("Library Target / Day")); oth = safe_float(school_row.get("Other Target / Day"))
+    target_rows = [
+        ("Lesson Delivery", f"{ld:.1f}", scope['source']['lessonDelivery'], f"{ld*workdays:.1f}", f"{ld*workdays*teacher_count:.1f}"),
+        ("Library", f"{lib:.1f}", scope['source']['library'], f"{lib*workdays:.1f}", f"{lib*workdays*teacher_count:.1f}"),
+        ("Other Modules", f"{oth:.1f}", scope['source']['otherModules'], f"{oth*workdays:.1f}", f"{oth*workdays*teacher_count:.1f}"),
+    ]
+    pdf_section_title(pdf, "KPI target mathematics", "Review target = daily benchmark x working days; school target = teacher review target x included teachers")
+    pdf_table(pdf, ["Module", "Min/day", "Source", "Per teacher", "School target"], target_rows, [42,24,49,34,37], ["L","R","L","R","R"], font_size=6.6, row_h=5.2)
+    pdf.ln(2)
+
+    # Institution Health contribution table.
+    pdf_section_title(pdf, "Institution Health mathematics", "Institution Health is the arithmetic mean of individual Teacher Health Scores")
+    health_rows = []
+    if teacher_data is not None and not teacher_data.empty:
+        for _, r in teacher_data.sort_values("Teacher").iterrows():
+            health_rows.append((str(r.get("Teacher")), f"{safe_float(r.get('Health Score')):.0f}/100"))
+        score_sum = sum(safe_float(r.get("Health Score")) for _, r in teacher_data.iterrows())
+        health_rows.append(("Average", f"{score_sum:.0f}/{len(teacher_data)} = {score_sum/len(teacher_data):.2f} -> {safe_float(school_row.get('Health Score')):.0f}/100"))
+    pdf_table(pdf, ["Teacher / calculation", "Health"], health_rows, [126,60], ["L","R"], font_size=6.8, row_h=4.8)
+    pdf.ln(2)
 
     if raw_school is not None and not raw_school.empty:
-        modules=raw_school.groupby("Raw Module")["Minutes"].sum().sort_values(ascending=False).head(10)
-        pdf_hbar_chart(pdf,"MODULE ADOPTION",[(str(k),safe_float(v)) for k,v in modules.items()])
+        modules = raw_school.groupby("Raw Module")["Minutes"].sum().sort_values(ascending=False).head(8)
+        pdf_hbar_chart(pdf, "Module adoption", [(str(k), safe_float(v)) for k, v in modules.items()], max_rows=8, height_each=6.0)
 
     if not teacher_data.empty:
-        priority=teacher_data.sort_values(["Health Score","Total Minutes"]).head(5)
-        top=teacher_data.sort_values(["Health Score","Total Minutes"],ascending=False).head(3)
-        pdf_note_box(pdf,"Implementation strengths",("Relatively stronger current performers: "+", ".join(top["Teacher"].astype(str).tolist())+". These teachers can be used as implementation reference points while retaining evidence-based review."),"success")
-        pdf_note_box(pdf,"Priority attention",("Priority teachers based on lowest current health/usage: "+", ".join(priority["Teacher"].astype(str).tolist())+". Review their lowest KPI, activity-day consistency and granular evidence before assigning intervention."),"warning")
-    pdf_note_box(pdf,f"{action_days}-day institutional action organizer",f"Days 1-2: validate teacher-level gaps and obtain commitments. Days 3-5: reinforce the lowest-adoption workflow with evidence-based practice. Days 6-{action_days}: track active days and KPI progress. At the checkpoint, compare the same metrics teacher by teacher and document movement.","purple")
+        top = teacher_data.sort_values(["Health Score","Total Minutes"], ascending=False).head(3)
+        strengths = "Reference points: " + ", ".join(top["Teacher"].astype(str).tolist()) + ". Use their stronger behaviours as examples while validating the underlying activity evidence."
+    else:
+        strengths = "No teacher-level evidence available."
+    pdf_note_box(pdf, "Implementation strengths", strengths, "success", max_lines=4)
+    pdf_note_box(pdf, "Management priority", _school_priority_text(teacher_data), "warning", max_lines=5)
+    pdf_note_box(pdf, f"{action_days}-day action organiser",
+                 f"Days 1-2: validate the lowest KPI and obtain teacher-specific commitments. Days 3-5: reinforce the weakest workflow through guided practice. Days 6-{action_days}: track active days and KPI movement. At the checkpoint, compare the same metrics teacher by teacher and record the next commitment.",
+                 "purple", max_lines=5)
 
     if ai_text:
-        excerpt=clean_ai_text(ai_text)[:1800]
-        pdf_note_box(pdf,"AI interpretation (verified-facts constrained)",excerpt,"info")
+        excerpt = clean_ai_text(ai_text)
+        pdf_note_box(pdf, "AI interpretation - verified facts only", excerpt, "info", max_lines=8)
 
-    pdf_note_box(pdf,"Closing note","This report converts usage evidence into focused academic implementation action. The next review should recognise improvement, isolate persistent gaps and agree measurable commitments with school leadership.","success")
-    add_signature(pdf,signature_name)
+    pdf_note_box(pdf, "Closing note",
+                 "This report converts verified platform evidence into focused academic implementation action. The next review should recognise measurable improvement, isolate persistent gaps and agree specific commitments with school leadership.",
+                 "success", max_lines=4)
+    add_signature(pdf, signature_name)
 
+    # ---------------- TEACHER SECTION ----------------
     if not teacher_data.empty:
-        for _,row in teacher_data.sort_values("Teacher").iterrows():
-            evidence=raw_school[raw_school["Teacher Key"]==row.get("Teacher Key")].copy() if raw_school is not None and not raw_school.empty else pd.DataFrame(columns=USAGE_COLUMNS)
-            add_teacher_report_page(pdf,row,evidence,start_date,end_date,action_days)
+        for _, row in teacher_data.sort_values("Teacher").iterrows():
+            evidence = raw_school[raw_school["Teacher Key"] == row.get("Teacher Key")].copy() if raw_school is not None and not raw_school.empty else pd.DataFrame(columns=USAGE_COLUMNS)
+            add_teacher_report_page(pdf, row, evidence, start_date, end_date, action_days, signature_name)
 
     return bytes(pdf.output())
 
 
 def make_premium_teacher_pdf(teacher_row, evidence, start_date, end_date, action_days=7):
-    pdf=ReportPDF(); pdf.set_auto_page_break(True,14); pdf.set_margins(12,12,12)
-    add_teacher_report_page(pdf,teacher_row,evidence,start_date,end_date,action_days)
+    pdf = ReportPDF(); pdf.set_auto_page_break(True, 14); pdf.set_margins(12,12,12)
+    add_teacher_report_page(pdf, teacher_row, evidence, start_date, end_date, action_days)
     return bytes(pdf.output())
 
 
