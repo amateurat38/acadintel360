@@ -149,6 +149,8 @@ def _invalidate_db_cache(table=None):
         cache.clear()
     else:
         cache.pop(table, None)
+    st.session_state.db_version = int(st.session_state.get("db_version", 0)) + 1
+    st.session_state.analytics_cache = {}
 
 
 def _db_all(table, refresh=False):
@@ -248,33 +250,35 @@ def discover_gemini_model():
 
 
 def ai_generate(prompt, force=False):
+    """Fast path: call the configured/default Flash model directly.
+    Model discovery is only attempted if that call fails.
+    """
     client = get_ai_client()
-    model, model_error = discover_gemini_model()
-    if client is None or not model:
-        raise RuntimeError(model_error or "Gemini is not connected.")
+    if client is None:
+        raise RuntimeError("Gemini is not connected. Check GEMINI_API_KEY in Streamlit Secrets.")
 
+    configured = str(st.secrets.get("GEMINI_MODEL", "")).strip()
+    model = configured or "gemini-2.5-flash"
     cache_key = hashlib.sha256((model + "\n" + prompt).encode("utf-8")).hexdigest()
     if not force and cache_key in st.session_state.ai_cache:
         return st.session_state.ai_cache[cache_key], model
 
-    config = None
-    if genai_types is not None:
-        config = genai_types.GenerateContentConfig(
-            temperature=0.2,
-            max_output_tokens=5000,
-        )
-
-    response = client.models.generate_content(
-        model=model,
-        contents=prompt,
-        config=config,
-    )
-    text = (getattr(response, "text", None) or "").strip()
-    if not text:
-        raise RuntimeError("Gemini returned an empty response.")
-
-    st.session_state.ai_cache[cache_key] = text
-    return text, model
+    try:
+        response = client.models.generate_content(model=model, contents=prompt)
+        text = clean_ai_text(response.text or "")
+        st.session_state.ai_cache[cache_key] = text
+        return text, model
+    except Exception as first_error:
+        fallback_model, discovery_error = discover_gemini_model()
+        if not fallback_model:
+            raise RuntimeError(discovery_error or str(first_error))
+        fallback_key = hashlib.sha256((fallback_model + "\n" + prompt).encode("utf-8")).hexdigest()
+        if not force and fallback_key in st.session_state.ai_cache:
+            return st.session_state.ai_cache[fallback_key], fallback_model
+        response = client.models.generate_content(model=fallback_model, contents=prompt)
+        text = clean_ai_text(response.text or "")
+        st.session_state.ai_cache[fallback_key] = text
+        return text, fallback_model
 
 
 # =========================================================
@@ -923,11 +927,10 @@ with st.sidebar:
     else:
         st.success("Supabase connected")
 
-    model_name, model_error = discover_gemini_model()
-    if model_name:
-        st.success(f"Gemini ready: {model_name}")
+    if get_ai_client() is not None:
+        st.caption("⚡ Gemini: ready on demand")
     else:
-        st.error(f"Gemini not ready: {model_error}")
+        st.error("Gemini not connected")
 
     uploaded_files = st.file_uploader(
         "Upload raw UserMetrics files",
@@ -940,6 +943,8 @@ with st.sidebar:
             data, errors = combine_usage_files(uploaded_files)
             st.session_state.raw = data
             st.session_state.import_errors = errors
+            st.session_state.raw_version = int(st.session_state.get("raw_version", 0)) + 1
+            st.session_state.analytics_cache = {}
         if not data.empty:
             st.success(f"{len(data):,} unique activity rows loaded.")
         for error in errors[:8]:
@@ -970,8 +975,21 @@ with st.sidebar:
     ])
 
 
-period_raw = filter_period(st.session_state.raw, start_date, end_date)
-teachers, schools, shared_usage = build_analytics(period_raw, start_date, end_date, workdays)
+analytics_key = (
+    int(st.session_state.get("raw_version", 0)),
+    int(st.session_state.get("db_version", 0)),
+    str(start_date),
+    str(end_date),
+    int(workdays),
+)
+
+_cached = st.session_state.analytics_cache.get(analytics_key)
+if _cached is None:
+    period_raw = filter_period(st.session_state.raw, start_date, end_date)
+    teachers, schools, shared_usage = build_analytics(period_raw, start_date, end_date, workdays)
+    st.session_state.analytics_cache = {analytics_key: (period_raw, teachers, schools, shared_usage)}
+else:
+    period_raw, teachers, schools, shared_usage = _cached
 
 if st.session_state.raw.empty and roster_dataframe().empty:
     st.markdown('<div class="hero"><h1>AcadIntel 360</h1><p>Upload UserMetrics files to begin evidence-backed school and teacher intelligence.</p></div>', unsafe_allow_html=True)
@@ -1112,11 +1130,14 @@ elif page == "Report & WhatsApp Hub":
         f"Regards,\nDilip Kumar Vishwakarma"
     )
 
-    pdf_bytes = make_text_pdf(
-        f"School 360 Intelligence Report - {school}",
-        f"Review Period: {start_date} to {end_date} | Working Days: {workdays}",
-        report_text,
-    )
+    pdf_key = "pdf::" + hashlib.sha256((school + str(start_date) + str(end_date) + report_text).encode("utf-8")).hexdigest()
+    if pdf_key not in st.session_state:
+        st.session_state[pdf_key] = make_text_pdf(
+            f"School 360 Intelligence Report - {school}",
+            f"Review Period: {start_date} to {end_date} | Working Days: {workdays}",
+            report_text,
+        )
+    pdf_bytes = st.session_state[pdf_key]
 
     st.subheader("One-Click Actions")
     q1, q2, q3, q4 = st.columns(4)
@@ -1257,11 +1278,14 @@ elif page == "School 360":
     if st.session_state.get(report_key + "::model"):
         st.caption(f"AI narrative generated with {st.session_state[report_key + '::model']}. KPI values are calculated by Python, not Gemini.")
 
-    pdf_bytes = make_text_pdf(
-        f"School 360 Intelligence Report - {school}",
-        f"Review Period: {start_date} to {end_date} | Working Days: {workdays}",
-        report_text,
-    )
+    pdf_key = "pdf::" + hashlib.sha256((school + str(start_date) + str(end_date) + report_text).encode("utf-8")).hexdigest()
+    if pdf_key not in st.session_state:
+        st.session_state[pdf_key] = make_text_pdf(
+            f"School 360 Intelligence Report - {school}",
+            f"Review Period: {start_date} to {end_date} | Working Days: {workdays}",
+            report_text,
+        )
+    pdf_bytes = st.session_state[pdf_key]
 
     msg_key = report_key + "::whatsapp"
     if msg_key not in st.session_state:
