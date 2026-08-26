@@ -549,6 +549,7 @@ def current_kpi_signature(school=None):
         round(safe_float(kpis.get("library")), 4),
         round(safe_float(kpis.get("otherModules")), 4),
         int(st.session_state.get("db_version", 0)),
+        "teacher-friendly-v2",
     )
 
 
@@ -871,19 +872,39 @@ VERIFIED FACTS:
 def teacher_report_prompt(facts, action_days):
     return f"""
 You are AcadIntel 360. Use ONLY the VERIFIED FACTS below. KPI calculations are final and must not be altered.
-Never invent reasons or behaviour.
-Create a detailed Teacher 360 report using these headings:
-EXECUTIVE DIAGNOSIS
-KPI SCORECARD INTERPRETATION
-ACTIVITY CONSISTENCY
-CONTENT AND CURRICULUM ENGAGEMENT
-STRENGTHS
-IMPLEMENTATION GAPS
-{action_days}-DAY DEVELOPMENT ACTION PLAN
-NEXT REVIEW TARGET
-MOTIVATIONAL CLOSING
-EVIDENCE
-No markdown asterisks. Tone must be respectful, developmental and measurable.
+Never invent reasons, behaviour, commitments or causes.
+
+This report will be read directly by teachers. Use very simple, clear English.
+Use short sentences. Avoid jargon such as implementation gap, configured KPI, denominator, adoption,
+activity-day consistency, utilisation pattern, intervention, cadence, benchmark attainment, or similar technical language.
+Whenever a technical number is necessary, explain it in everyday words.
+
+Create a teacher-friendly report using these headings:
+YOUR PERFORMANCE AT A GLANCE
+WHAT YOU ARE DOING WELL
+WHAT NEEDS MORE ATTENTION
+YOUR {action_days}-DAY ACTION PLAN
+YOUR NEXT REVIEW TARGET
+A POSITIVE CLOSING
+EVIDENCE USED
+
+The action plan must be personal to THIS teacher's verified performance.
+It must tell the teacher exactly:
+1. what to do,
+2. how many minutes or days are expected where the verified KPI supports it,
+3. which weak module to focus on,
+4. what strong area should be maintained,
+5. what will be checked at the next review.
+
+Do not give the same generic plan to every teacher.
+If the teacher has zero usage, start with login/navigation and small measurable steps.
+If active days are low, first improve regularity.
+If a KPI is especially weak, make that the main focus.
+If the teacher is already performing strongly, focus on maintaining performance and helping others where appropriate.
+
+No markdown asterisks.
+Tone: respectful, encouraging, easy to understand, specific and practical.
+
 VERIFIED FACTS:
 {json.dumps(facts, default=str)}
 """
@@ -1436,25 +1457,167 @@ def kpi_target_math_explanation(school_row, workdays, teacher_count):
     )
 
 
-def teacher_auto_insights(row, action_days=7):
-    # preserve deterministic, auditable insights
+def _teacher_daily_targets(row):
+    workdays = max(1, int(safe_float(row.get("Eligible Working Days"))))
+    return {
+        "Lesson Delivery": safe_float(row.get("Lesson Target")) / workdays,
+        "Library": safe_float(row.get("Library Target")) / workdays,
+        "Other Modules": safe_float(row.get("Other Target")) / workdays,
+    }
+
+
+def _simple_module_instruction(module_name, daily_minutes):
+    mins = max(0, round(safe_float(daily_minutes), 1))
+
+    if module_name == "Lesson Delivery":
+        return (
+            f"Use Lesson Delivery for about {mins:g} minutes on every working day. "
+            "Open the lesson before class and use the available teaching content during classroom preparation or delivery."
+        )
+
+    if module_name == "Library":
+        return (
+            f"Use the Library for about {mins:g} minutes on every working day. "
+            "Open books or learning resources that are directly useful for the classes you teach."
+        )
+
+    return (
+        f"Use the supporting modules for about {mins:g} minutes on every working day. "
+        "Use relevant features such as Book, Assignment, Assessment, Attendance or other available tools as required for your class."
+    )
+
+
+def curated_teacher_action_plan(row, action_days=7):
+    """Create a deterministic, individual action plan from this teacher's verified data."""
     lesson = safe_float(row.get("Lesson KPI %"))
     library = safe_float(row.get("Library KPI %"))
     other = safe_float(row.get("Other KPI %"))
     total = safe_float(row.get("Total Minutes"))
     active = int(safe_float(row.get("Active Days")))
     workdays = max(1, int(safe_float(row.get("Eligible Working Days"))))
-    consistency = active / workdays * 100
-    metrics = {"Lesson Delivery": lesson, "Library": library, "Other Modules": other}
+    consistency = min(active / workdays * 100, 100)
+
+    metrics = {
+        "Lesson Delivery": lesson,
+        "Library": library,
+        "Other Modules": other,
+    }
+    targets = _teacher_daily_targets(row)
+    weakest = min(metrics, key=metrics.get)
+    strongest = max(metrics, key=metrics.get)
+
+    all_met = all(value >= 100 for value in metrics.values())
+    zero_usage = total <= 0
+    low_regular_use = consistency < 40
+    medium_regular_use = 40 <= consistency < 70
+
+    weak_instruction = _simple_module_instruction(weakest, targets[weakest])
+    strong_instruction = (
+        f"Keep using {strongest}; this is currently your strongest area at {metrics[strongest]:.1f}% of the expected level."
+    )
+
+    if action_days == 15:
+        phases = [
+            ("Days 1-3", "Start"),
+            ("Days 4-7", "Build"),
+            ("Days 8-12", "Improve"),
+            ("Days 13-15", "Review"),
+        ]
+    else:
+        phases = [
+            ("Day 1", "Start"),
+            ("Days 2-3", "Build"),
+            ("Days 4-6", "Improve"),
+            ("Day 7", "Review"),
+        ]
+
+    if all_met:
+        steps = [
+            f"{phases[0][0]}: Continue your present routine. All three KPI areas are currently meeting the expected level.",
+            f"{phases[1][0]}: Maintain Lesson Delivery, Library and Other Modules on every working day. Avoid a drop in regular usage.",
+            f"{phases[2][0]}: Keep your strongest area ({strongest}) stable and support good classroom use of the other modules too.",
+            f"{phases[3][0]}: Check that all three KPI areas are still at or above 100%. If possible, share one useful practice with another teacher.",
+        ]
+        return "\n".join(steps)
+
+    if zero_usage:
+        steps = [
+            f"{phases[0][0]}: Log in successfully and open Lesson Delivery, Library and the supporting modules once. Ask for help immediately if login or access is not working.",
+            f"{phases[1][0]}: Begin with {weak_instruction}",
+            f"{phases[2][0]}: Use the platform on every working day. Also start Library use for about {targets['Library']:g} minutes per day and keep a simple daily routine.",
+            f"{phases[3][0]}: Review your active days and minutes. The first goal is to move from zero usage to regular, measurable usage.",
+        ]
+        return "\n".join(steps)
+
+    regularity_text = ""
+    if low_regular_use:
+        regularity_text = (
+            f"Your first improvement is regularity. You used the platform on {active} out of {workdays} working days. "
+            "Use it on every working day during this action period."
+        )
+    elif medium_regular_use:
+        regularity_text = (
+            f"You used the platform on {active} out of {workdays} working days. "
+            "Try to reduce missed working days during this action period."
+        )
+    else:
+        regularity_text = (
+            f"Your regular use is comparatively better at {active} out of {workdays} working days. "
+            "Now focus more on the amount and purpose of usage."
+        )
+
+    steps = [
+        f"{phases[0][0]}: {regularity_text}",
+        f"{phases[1][0]}: Main focus — {weak_instruction}",
+        f"{phases[2][0]}: {strong_instruction} At the same time, continue working on {weakest} so the gap becomes smaller.",
+        (
+            f"{phases[3][0]}: Check your progress. The review will compare active days, "
+            f"{weakest} usage and all three KPI percentages with your current results."
+        ),
+    ]
+    return "\n".join(steps)
+
+
+def teacher_auto_insights(row, action_days=7):
+    lesson = safe_float(row.get("Lesson KPI %"))
+    library = safe_float(row.get("Library KPI %"))
+    other = safe_float(row.get("Other KPI %"))
+    total = safe_float(row.get("Total Minutes"))
+    active = int(safe_float(row.get("Active Days")))
+    workdays = max(1, int(safe_float(row.get("Eligible Working Days"))))
+    consistency = min(active / workdays * 100, 100)
+
+    metrics = {
+        "Lesson Delivery": lesson,
+        "Library": library,
+        "Other Modules": other,
+    }
     strongest = max(metrics, key=metrics.get)
     weakest = min(metrics, key=metrics.get)
-    diagnosis = f"{total:.1f} minutes recorded across {active}/{workdays} active days ({consistency:.1f}% consistency)."
-    strength = f"Strongest relative adoption: {strongest} at {metrics[strongest]:.1f}% of configured KPI."
-    focus = f"Primary implementation gap: {weakest} at {metrics[weakest]:.1f}% of configured KPI."
-    plan = (
-        f"Next {action_days} days: establish a daily usage rhythm, prioritise {weakest}, "
-        "use the relevant classroom/content workflow, and review the same KPI denominator at the next checkpoint."
-    )
+
+    if total <= 0:
+        diagnosis = (
+            f"No platform use was recorded during this review period. "
+            f"The first goal is to start using the platform regularly."
+        )
+        strength = (
+            "Your account is part of the teacher list, so we have a clear starting point for the next review."
+        )
+        focus = (
+            "Start with successful login, basic navigation and regular use on every working day."
+        )
+    else:
+        diagnosis = (
+            f"You used the platform for {total:.1f} minutes and were active on {active} out of {workdays} working days."
+        )
+        strength = (
+            f"Your strongest area is {strongest}. You have reached {metrics[strongest]:.1f}% of the expected target in this area."
+        )
+        focus = (
+            f"Your first priority is {weakest}. You have reached {metrics[weakest]:.1f}% of the expected target in this area."
+        )
+
+    plan = curated_teacher_action_plan(row, action_days)
     return diagnosis, strength, focus, plan
 
 
@@ -1515,32 +1678,47 @@ def add_teacher_report_page(pdf, row, evidence, start_date, end_date, action_day
     pdf.set_y(y + 2)
 
     components, total_calc, consistency = teacher_math_components(row)
-    pdf_section_title(pdf, "Health score mathematics", "Transparent weighted calculation - capped at 100% per component")
+    pdf_section_title(pdf, "How your Health Score is calculated", "The calculation below shows exactly how your score is made")
     rows = [(label, f"{ach:.1f}%", f"{weight:.0f}%", f"{contrib:.2f}") for label, ach, weight, contrib in components]
     rows.append(("TOTAL", "", "", f"{total_calc:.2f} -> {safe_float(row.get('Health Score')):.0f}/100"))
-    pdf_table(pdf, ["Component", "Achievement", "Weight", "Contribution"], rows, [62, 38, 28, 58], ["L","R","R","R"], font_size=6.9, row_h=4.9)
+    pdf_table(pdf, ["Area", "Your result", "Score weight", "Score added"], rows, [62, 38, 28, 58], ["L","R","R","R"], font_size=6.9, row_h=4.9)
     pdf.ln(2)
 
     diagnosis, strength, focus, plan = teacher_auto_insights(row, action_days)
-    # Two-column executive insight organizer
-    _ensure_space(pdf, 31)
+
+    # Teacher-friendly summary: plain language, short statements.
+    _ensure_space(pdf, 24)
     x = pdf.l_margin; y0 = pdf.get_y(); gap = 3; col = (pdf.epw - gap) / 2
     pdf.set_xy(x, y0)
-    _mini_box(pdf, x, y0, col, 27, "WHAT THE DATA SAYS", diagnosis + " " + strength, "info")
-    _mini_box(pdf, x + col + gap, y0, col, 27, "PRIORITY ACTION", focus + " " + plan, "warning")
-    pdf.set_y(y0 + 31)
-
-    if evidence is not None and not evidence.empty:
-        # Compact top modules only; raw evidence remains available in app.
-        modules = evidence.groupby("Raw Module")["Minutes"].sum().sort_values(ascending=False).head(5)
-        pdf_hbar_chart(pdf, "Top module utilisation", [(str(k), safe_float(v)) for k, v in modules.items()], max_rows=5, height_each=6.2)
+    _mini_box(pdf, x, y0, col, 20, "WHAT YOU ARE DOING WELL", strength, "success")
+    _mini_box(pdf, x + col + gap, y0, col, 20, "WHAT NEEDS MORE ATTENTION", focus, "warning")
+    pdf.set_y(y0 + 24)
 
     pdf_note_box(
         pdf,
-        "Closing note",
-        "At the next review, compare the same KPI percentages, active-day consistency and content breadth. Recognise verified improvement and agree a measurable commitment for any persistent gap.",
+        f"Your personal {action_days}-day action plan",
+        plan,
+        "info",
+        max_lines=10,
+    )
+
+    if evidence is not None and not evidence.empty:
+        # Keep only the strongest four modules so the page stays clean.
+        modules = evidence.groupby("Raw Module")["Minutes"].sum().sort_values(ascending=False).head(4)
+        pdf_hbar_chart(
+            pdf,
+            "Where you used the platform most",
+            [(str(k), safe_float(v)) for k, v in modules.items()],
+            max_rows=4,
+            height_each=5.8,
+        )
+
+    pdf_note_box(
+        pdf,
+        "A note for you",
+        "This report is meant to help you improve step by step. At the next review, we will compare the same numbers and recognise every clear improvement.",
         "success",
-        max_lines=4,
+        max_lines=3,
     )
 
     # Keep each Teacher 360 profile self-contained on one page.
@@ -2145,10 +2323,28 @@ if page == "⚡ Quick Desk":
             tf=px.bar(tdf,x="KPI",y="Achievement",text_auto=".1f",range_y=[0,max(110,float(tdf["Achievement"].max())*1.1)],title=f"{teacher_name} — KPI achievement %")
             st.plotly_chart(tf,use_container_width=True)
             diagnosis,strength,focus,plan=teacher_auto_insights(tr,action_days)
+            st.markdown(
+                f'<div class="insight-box"><b>Simple performance summary</b><br>{diagnosis}</div>',
+                unsafe_allow_html=True,
+            )
             x1,x2=st.columns(2)
-            x1.markdown(f'<div class="success-box"><b>Relative strength</b><br>{strength}</div>',unsafe_allow_html=True)
-            x2.markdown(f'<div class="warning-box"><b>Priority focus</b><br>{focus}</div>',unsafe_allow_html=True)
-            st.markdown(f'<div class="insight-box"><b>{action_days}-day plan</b><br>{plan}</div>',unsafe_allow_html=True)
+            x1.markdown(
+                f'<div class="success-box"><b>What you are doing well</b><br>{strength}</div>',
+                unsafe_allow_html=True,
+            )
+            x2.markdown(
+                f'<div class="warning-box"><b>What needs more attention</b><br>{focus}</div>',
+                unsafe_allow_html=True,
+            )
+            st.markdown(f"### 🎯 Your personal {action_days}-day action plan")
+            for step in plan.split("\n"):
+                if step.strip():
+                    st.markdown(
+                        f'<div style="padding:10px 14px;margin:7px 0;border-radius:12px;'
+                        f'background:#F8FAFC;border:1px solid #E2E8F0;line-height:1.55;">'
+                        f'{step}</div>',
+                        unsafe_allow_html=True,
+                    )
             teacher_pdf=make_premium_teacher_pdf(tr,ev,start_date,end_date,action_days)
             st.download_button("⬇ Download this Teacher 360 PDF",teacher_pdf,file_name=re.sub(r"[^A-Za-z0-9]+","_",teacher_name)+"_360_Report.pdf",mime="application/pdf",use_container_width=True)
             if not ev.empty:
@@ -2573,10 +2769,14 @@ elif page == "Teacher 360":
     action_days = st.radio("Development plan interval", [7, 15], horizontal=True, key="teacher_action_days")
     key = f"teacher_report::{school_filter}::{teacher_name}::{start_date}::{end_date}::{workdays}::{action_days}::{current_kpi_signature(school_filter)}"
     if key not in st.session_state:
+        _diag, _strength, _focus, _plan = teacher_auto_insights(teacher_row, action_days)
         st.session_state[key] = (
-            f"EXECUTIVE DIAGNOSIS\n{teacher_name} has a Health Score of {teacher_row['Health Score']}/100 and status '{teacher_row['Status']}'.\n\n"
-            f"KPI SCORECARD\nLesson Delivery {teacher_row['Lesson KPI %']}%, Library {teacher_row['Library KPI %']}%, Other Modules {teacher_row['Other KPI %']}%.\n\n"
-            f"{action_days}-DAY DEVELOPMENT ACTION PLAN\nPrioritize the lowest KPI areas and review verified activity evidence at the next checkpoint."
+            f"YOUR PERFORMANCE AT A GLANCE\n{_diag}\n\n"
+            f"WHAT YOU ARE DOING WELL\n{_strength}\n\n"
+            f"WHAT NEEDS MORE ATTENTION\n{_focus}\n\n"
+            f"YOUR {action_days}-DAY ACTION PLAN\n{_plan}\n\n"
+            f"YOUR NEXT REVIEW TARGET\nWe will check your active days and all three KPI percentages again using the same configured targets.\n\n"
+            f"A POSITIVE CLOSING\nSmall, regular improvement is the goal. Every verified improvement will be recognised."
         )
 
     auto_teacher = st.checkbox("Auto-generate detailed AI report", value=False, key=f"auto_teacher_{teacher_row['Teacher Key']}", help="Keep OFF for fastest browsing; use the Generate button when needed.")
