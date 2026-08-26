@@ -1219,6 +1219,213 @@ def followup_dialog(school_name):
             st.rerun()
 
 
+
+
+# =========================================================
+# SMART WHATSAPP -> FOLLOW-UP -> CALENDAR WORKFLOW
+# =========================================================
+def _next_school_day(d):
+    # Sundays are excluded from the implementation review cycle.
+    while d.weekday() == 6:
+        d += timedelta(days=1)
+    return d
+
+
+def suggest_followup(school_row):
+    health = float(school_row.get("Health Score", 0) or 0)
+    compliance = float(school_row.get("Overall Compliance %", 0) or 0)
+    inactive = int(school_row.get("Inactive / Never Logged In", 0) or 0)
+
+    if inactive > 0 or health < 25 or compliance <= 10:
+        gap_days = 3
+        urgency = "High priority"
+    elif health < 50 or compliance < 40:
+        gap_days = 5
+        urgency = "Priority"
+    elif health < 75 or compliance < 70:
+        gap_days = 7
+        urgency = "Standard review"
+    else:
+        gap_days = 10
+        urgency = "Sustainability review"
+
+    suggested_date = _next_school_day(date.today() + timedelta(days=gap_days))
+
+    if inactive > 0:
+        issue = (
+            f"{inactive} teacher(s) are inactive / never logged in. Review activation, "
+            f"KPI movement and implementation barriers after the shared report."
+        )
+    elif compliance < 100:
+        issue = (
+            f"Review progress against the shared School 360 report. Current full KPI "
+            f"compliance is {compliance:.1f}% and Health Score is {health:.0f}/100."
+        )
+    else:
+        issue = (
+            "Review sustained implementation after the shared School 360 report and "
+            "confirm that current KPI performance is being maintained."
+        )
+
+    return suggested_date, urgency, issue
+
+
+def _calendar_payload(school, follow_date, follow_time, issue, commitment):
+    start_dt = datetime.combine(follow_date, follow_time)
+    end_dt = start_dt + timedelta(minutes=30)
+    title = f"AcadIntel Follow-Up - {school}"
+    details = (
+        f"School: {school}\n"
+        f"Report shared via WhatsApp: {date.today().strftime('%d %b %Y')}\n"
+        f"Follow-up focus: {issue}\n"
+        f"Last commitment: {commitment or 'To be confirmed during follow-up'}\n\n"
+        "Prepared through AcadIntel 360.\n"
+        "Dilip Kumar Vishwakarma | Academic Consultant"
+    )
+    return title, details, start_dt, end_dt
+
+
+def google_calendar_url(school, follow_date, follow_time, issue, commitment):
+    title, details, start_dt, end_dt = _calendar_payload(
+        school, follow_date, follow_time, issue, commitment
+    )
+    params = {
+        "action": "TEMPLATE",
+        "text": title,
+        "dates": f"{start_dt.strftime('%Y%m%dT%H%M%S')}/{end_dt.strftime('%Y%m%dT%H%M%S')}",
+        "details": details,
+        "ctz": "Asia/Kolkata",
+    }
+    return "https://calendar.google.com/calendar/render?" + urllib.parse.urlencode(params)
+
+
+def outlook_calendar_url(school, follow_date, follow_time, issue, commitment):
+    title, details, start_dt, end_dt = _calendar_payload(
+        school, follow_date, follow_time, issue, commitment
+    )
+    params = {
+        "path": "/calendar/action/compose",
+        "rru": "addevent",
+        "subject": title,
+        "startdt": start_dt.strftime('%Y-%m-%dT%H:%M:%S'),
+        "enddt": end_dt.strftime('%Y-%m-%dT%H:%M:%S'),
+        "body": details,
+    }
+    return "https://outlook.office.com/calendar/0/deeplink/compose?" + urllib.parse.urlencode(params)
+
+
+def make_ics_event(school, follow_date, follow_time, issue, commitment):
+    title, details, start_dt, end_dt = _calendar_payload(
+        school, follow_date, follow_time, issue, commitment
+    )
+
+    def esc(v):
+        return str(v).replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,").replace("\n", "\\n")
+
+    uid = hashlib.sha256(
+        f"{school}|{start_dt.isoformat()}|{issue}".encode("utf-8")
+    ).hexdigest()[:24] + "@acadintel360"
+
+    ics = (
+        "BEGIN:VCALENDAR\r\n"
+        "VERSION:2.0\r\n"
+        "PRODID:-//AcadIntel 360//Academic Follow-Up//EN\r\n"
+        "CALSCALE:GREGORIAN\r\n"
+        "BEGIN:VEVENT\r\n"
+        f"UID:{uid}\r\n"
+        f"DTSTAMP:{datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}\r\n"
+        f"DTSTART;TZID=Asia/Kolkata:{start_dt.strftime('%Y%m%dT%H%M%S')}\r\n"
+        f"DTEND;TZID=Asia/Kolkata:{end_dt.strftime('%Y%m%dT%H%M%S')}\r\n"
+        f"SUMMARY:{esc(title)}\r\n"
+        f"DESCRIPTION:{esc(details)}\r\n"
+        "BEGIN:VALARM\r\n"
+        "TRIGGER:-PT30M\r\n"
+        "ACTION:DISPLAY\r\n"
+        f"DESCRIPTION:{esc('Follow up with ' + school)}\r\n"
+        "END:VALARM\r\n"
+        "END:VEVENT\r\n"
+        "END:VCALENDAR\r\n"
+    )
+    return ics.encode("utf-8")
+
+
+@st.dialog("💬 Report Shared — Schedule the Next Follow-Up", width="large")
+def share_followup_dialog(school, message, school_row, group_url=""):
+    suggested_date, urgency, suggested_issue = suggest_followup(school_row)
+
+    st.markdown(
+        f"**AcadIntel suggestion:** {urgency}. Based on the current implementation "
+        f"position, review **{school}** on **{suggested_date.strftime('%d %b %Y')}**."
+    )
+    st.caption(
+        "This pop-up is triggered when you choose to share the report. WhatsApp does not "
+        "send a confirmation back to Streamlit, so AcadIntel schedules from your share action."
+    )
+
+    c1, c2 = st.columns(2)
+    follow_date = c1.date_input(
+        "Suggested follow-up date", value=suggested_date, key=f"share_fu_date_{school}"
+    )
+    follow_time = c2.time_input(
+        "Reminder time", value=datetime.strptime("10:00", "%H:%M").time(), key=f"share_fu_time_{school}"
+    )
+
+    issue = st.text_area(
+        "Suggested follow-up focus", value=suggested_issue, height=110, key=f"share_fu_issue_{school}"
+    )
+    commitment = st.text_area(
+        "Last commitment / expected commitment",
+        value="Review the School 360 report and confirm measurable improvement before the next review.",
+        height=90,
+        key=f"share_fu_commitment_{school}",
+    )
+
+    google_url = google_calendar_url(school, follow_date, follow_time, issue, commitment)
+    outlook_url = outlook_calendar_url(school, follow_date, follow_time, issue, commitment)
+    ics_bytes = make_ics_event(school, follow_date, follow_time, issue, commitment)
+    whatsapp_url = "https://wa.me/?text=" + urllib.parse.quote(message)
+
+    st.markdown("#### 1. Save the follow-up")
+    s1, s2 = st.columns([1.35, 1])
+    if s1.button("✅ Save Follow-Up in AcadIntel", type="primary", use_container_width=True, key=f"save_share_fu_{school}"):
+        db_insert("followups", {
+            "school_name": school,
+            "followup_date": str(follow_date),
+            "issue": issue.strip(),
+            "last_commitment": commitment.strip(),
+            "status": "Open",
+            "remarks": "Created from WhatsApp report-sharing workflow.",
+        })
+        st.session_state[f"share_fu_saved::{school}::{follow_date}"] = True
+        st.success("Follow-up saved in AcadIntel 360.")
+
+    s2.download_button(
+        "⏰ Calendar Alarm (.ics)",
+        data=ics_bytes,
+        file_name=re.sub(r"[^A-Za-z0-9]+", "_", school) + "_Follow_Up.ics",
+        mime="text/calendar",
+        use_container_width=True,
+        help="Works with most calendar apps and includes a 30-minute reminder alarm.",
+    )
+
+    st.markdown("#### 2. Add it to your calendar")
+    g1, g2 = st.columns(2)
+    g1.link_button("📅 Add to Google Calendar", google_url, use_container_width=True)
+    g2.link_button("🗓️ Add to Outlook Calendar", outlook_url, use_container_width=True)
+
+    st.markdown("#### 3. Share the report")
+    w1, w2 = st.columns(2)
+    w1.link_button("💬 Open WhatsApp with Message", whatsapp_url, use_container_width=True)
+    if group_url:
+        w2.link_button("👥 Open Saved School Group", group_url, use_container_width=True)
+    else:
+        w2.button("👥 School group not saved", disabled=True, use_container_width=True)
+
+    if st.button("Done", use_container_width=True, key=f"close_share_fu_{school}"):
+        st.session_state.share_follow_school = None
+        st.rerun()
+
+
 # =========================================================
 # SIDEBAR
 # =========================================================
@@ -1363,13 +1570,16 @@ if page == "⚡ Quick Desk":
         a1.download_button("⬇ Full PDF Pack",pdf_bytes,file_name=re.sub(r"[^A-Za-z0-9]+","_",school)+"_360_Full_Report.pdf",mime="application/pdf",use_container_width=True,help="School overview + a separate Teacher 360 report for every teacher in one PDF.")
     else:
         a1.button("⬇ PDF unavailable",disabled=True,use_container_width=True)
-    a2.link_button("💬 WhatsApp","https://wa.me/?text="+urllib.parse.quote(message),use_container_width=True)
+    if a2.button("💬 Share + Follow-Up", use_container_width=True, type="primary"):
+        st.session_state.share_follow_school = school
     if group_url: a3.link_button("👥 School Group",group_url,use_container_width=True)
     else: a3.button("👥 Add Group",disabled=True,use_container_width=True)
     if clean_phone: a4.link_button("📞 Call KDM",f"tel:+{clean_phone}",use_container_width=True)
     else: a4.button("📞 Add Number",disabled=True,use_container_width=True)
     if a5.button("📅 Follow Up",use_container_width=True): st.session_state.follow_school=school
     if st.session_state.follow_school==school: followup_dialog(school)
+    if st.session_state.get("share_follow_school") == school:
+        share_followup_dialog(school, message, school_row, group_url)
     if st.session_state.get(pdf_key+"::error"): st.error("PDF could not be prepared: "+st.session_state[pdf_key+"::error"])
 
     tabs=st.tabs(["📊 Report Dashboard","👩‍🏫 Teacher Reports","✨ AI Interpretation","💬 Communication"])
@@ -1426,7 +1636,9 @@ if page == "⚡ Quick Desk":
         st.markdown("### Ready-to-send school communication")
         st.text_area("Customized WhatsApp message",message,height=240,key=f"premium_message_{school}")
         c1,c2=st.columns(2)
-        c1.link_button("💬 Open WhatsApp with message","https://wa.me/?text="+urllib.parse.quote(message),use_container_width=True)
+        if c1.button("💬 Share + Schedule Follow-Up", use_container_width=True, type="primary"):
+            st.session_state.share_follow_school = school
+            st.rerun()
         if group_url: c2.link_button("👥 Open saved school group",group_url,use_container_width=True)
         else: c2.button("👥 Save group link below",disabled=True,use_container_width=True)
         with st.expander("School contact settings",expanded=not(bool(phone) and bool(group_url))):
