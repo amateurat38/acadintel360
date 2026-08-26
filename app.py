@@ -143,37 +143,61 @@ def get_supabase():
 sb = get_supabase()
 
 
-def db_select(table, filters=None, order=None):
+def _invalidate_db_cache(table=None):
+    cache = st.session_state.setdefault("db_cache", {})
+    if table is None:
+        cache.clear()
+    else:
+        cache.pop(table, None)
+
+
+def _db_all(table, refresh=False):
+    """Load each Supabase table once per Streamlit session.
+    This avoids repeated network round-trips on every widget rerun.
+    """
     if sb is None:
         return []
-    try:
-        q = sb.table(table).select("*")
-        for key, value in (filters or {}).items():
-            q = q.eq(key, value)
-        if order:
-            q = q.order(order)
-        return q.execute().data or []
-    except Exception as exc:
-        st.warning(f"Database read issue ({table}): {exc}")
-        return []
+    cache = st.session_state.setdefault("db_cache", {})
+    if refresh or table not in cache:
+        try:
+            cache[table] = sb.table(table).select("*").execute().data or []
+        except Exception as exc:
+            st.warning(f"Database read issue ({table}): {exc}")
+            cache[table] = []
+    return list(cache.get(table, []))
+
+
+def db_select(table, filters=None, order=None, refresh=False):
+    rows = _db_all(table, refresh=refresh)
+    for key, value in (filters or {}).items():
+        rows = [r for r in rows if r.get(key) == value]
+    if order:
+        rows = sorted(rows, key=lambda r: (r.get(order) is None, r.get(order)))
+    return rows
 
 
 def db_insert(table, payload):
     if sb is None:
         raise RuntimeError("Supabase is not connected.")
-    return sb.table(table).insert(json_safe(payload)).execute().data
+    data = sb.table(table).insert(json_safe(payload)).execute().data
+    _invalidate_db_cache(table)
+    return data
 
 
 def db_update(table, payload, row_id):
     if sb is None:
         raise RuntimeError("Supabase is not connected.")
-    return sb.table(table).update(json_safe(payload)).eq("id", row_id).execute().data
+    data = sb.table(table).update(json_safe(payload)).eq("id", row_id).execute().data
+    _invalidate_db_cache(table)
+    return data
 
 
 def db_delete(table, row_id):
     if sb is None:
         raise RuntimeError("Supabase is not connected.")
-    return sb.table(table).delete().eq("id", row_id).execute().data
+    data = sb.table(table).delete().eq("id", row_id).execute().data
+    _invalidate_db_cache(table)
+    return data
 
 
 # =========================================================
@@ -195,7 +219,7 @@ def discover_gemini_model():
 
     configured = str(st.secrets.get("GEMINI_MODEL", "")).strip()
     preferred = [configured] if configured else []
-    preferred += ["gemini-3.7-flash", "gemini-2.5-flash"]
+    preferred += ["gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-2.5-flash"]
 
     for name in preferred:
         if not name:
@@ -942,7 +966,7 @@ with st.sidebar:
     st.caption(f"KPI denominator: {workdays} working day(s)")
 
     page = st.radio("Navigate", [
-        "Command Center", "School 360", "Teacher 360", "Follow-Ups", "KPI & Roster", "Ask AcadIntel"
+        "Command Center", "Report & WhatsApp Hub", "School 360", "Teacher 360", "Follow-Ups", "KPI & Roster", "Ask AcadIntel"
     ])
 
 
@@ -1005,6 +1029,123 @@ if page == "Command Center":
             a.metric("Due Today", len(due)); b.metric("Overdue", len(overdue)); c.metric("Upcoming", len(upcoming))
         else:
             st.info("No follow-ups saved yet.")
+
+
+# =========================================================
+# REPORT & WHATSAPP HUB
+# =========================================================
+elif page == "Report & WhatsApp Hub":
+    if schools.empty:
+        st.warning("No school data available. Upload and process UserMetrics first.")
+        st.stop()
+
+    st.markdown(
+        """
+        <div class="hero">
+            <h1>Report & WhatsApp Hub</h1>
+            <p>Generate a complete school report, download it, and share a customized school message from one screen.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    school = st.selectbox("Select School", schools["School"].tolist(), key="hub_school")
+    school_row = schools[schools["School"] == school].iloc[0]
+    school_teachers = teachers[teachers["School"] == school].copy()
+    school_raw = period_raw[period_raw["School"] == school].copy()
+    facts = school_verified_facts(school_row, school_teachers, school_raw, start_date, end_date, workdays)
+
+    contact_rows = db_select("schools", {"school_name": school})
+    contact = contact_rows[0] if contact_rows else {}
+    phone = str(contact.get("contact_phone") or "")
+    group_url = str(contact.get("whatsapp_group_url") or "")
+    contact_role = str(contact.get("contact_role") or "School Management")
+    clean_phone = re.sub(r"\D", "", phone)
+
+    a, b, c, d = st.columns(4)
+    a.metric("Health", f"{school_row['Health Score']}/100")
+    b.metric("Compliance", f"{school_row['Overall Compliance %']}%")
+    c.metric("Active Teachers", school_row["Active"])
+    d.metric("Inactive", school_row["Inactive / Never Logged In"])
+
+    action_days = st.radio("Action plan interval", [7, 15], horizontal=True, key="hub_action_days")
+    auto_once = st.toggle("Auto-generate once when I open this school", value=False, help="Keep this OFF for maximum speed. Turn it ON only when you want automatic AI generation.")
+    report_key = f"hub_report::{school}::{start_date}::{end_date}::{workdays}::{action_days}"
+
+    if report_key not in st.session_state:
+        st.session_state[report_key] = deterministic_school_summary(school_row, action_days)
+
+    clicked = st.button("⚡ Generate Complete Report + Share Message", type="primary", use_container_width=True)
+    should_auto = auto_once and not st.session_state.get(report_key + "::ai_done", False)
+
+    if clicked or should_auto:
+        try:
+            with st.spinner("Generating the evidence-backed report with Gemini..."):
+                text, used_model = ai_generate(school_report_prompt(facts, action_days), force=clicked)
+            st.session_state[report_key] = text
+            st.session_state[report_key + "::ai_done"] = True
+            st.session_state[report_key + "::model"] = used_model
+            db_insert("report_history", {
+                "report_level": "School",
+                "school_name": school,
+                "action_plan_days": action_days,
+                "report_text": text,
+                "verified_facts": facts,
+            })
+        except Exception as exc:
+            st.error(f"Gemini report generation failed: {exc}")
+            st.info("A deterministic report is still available immediately below.")
+
+    report_text = st.session_state[report_key]
+
+    priority = school_teachers.sort_values(["Health Score", "Total Minutes"]).head(4) if not school_teachers.empty else pd.DataFrame()
+    priority_names = ", ".join(priority["Teacher"].astype(str).tolist()) if not priority.empty else "No priority teachers identified"
+    message = (
+        f"Dear Sir/Ma'am,\n\n"
+        f"Please find the implementation performance update for {school} for {start_date} to {end_date} ({workdays} working days).\n\n"
+        f"📊 Health Score: {school_row['Health Score']}/100\n"
+        f"🎯 Full KPI Compliance: {school_row['Overall Compliance %']}%\n"
+        f"👩‍🏫 Active Teachers: {school_row['Active']}/{school_row['Teachers']}\n"
+        f"⚠️ Priority Review: {priority_names}\n\n"
+        f"The attached/report copy includes module-wise evidence, teacher-level gaps and the {action_days}-day action plan. "
+        f"Kindly review the same so that we can align the next implementation actions.\n\n"
+        f"Regards,\nDilip Kumar Vishwakarma"
+    )
+
+    pdf_bytes = make_text_pdf(
+        f"School 360 Intelligence Report - {school}",
+        f"Review Period: {start_date} to {end_date} | Working Days: {workdays}",
+        report_text,
+    )
+
+    st.subheader("One-Click Actions")
+    q1, q2, q3, q4 = st.columns(4)
+    q1.download_button(
+        "⬇ Download Report PDF",
+        data=pdf_bytes,
+        file_name=re.sub(r"[^A-Za-z0-9]+", "_", school) + "_School_360.pdf",
+        mime="application/pdf",
+        use_container_width=True,
+    )
+    q2.link_button(
+        "💬 Share Customized WhatsApp",
+        "https://wa.me/?text=" + urllib.parse.quote(message),
+        use_container_width=True,
+    )
+    if group_url:
+        q3.link_button("👥 Open School WhatsApp Group", group_url, use_container_width=True)
+    else:
+        q3.button("👥 Add Group Link in School 360", disabled=True, use_container_width=True)
+    if clean_phone:
+        q4.link_button("📞 Call KDM", f"tel:+{clean_phone}", use_container_width=True)
+    else:
+        q4.button("📞 Add KDM Number in School 360", disabled=True, use_container_width=True)
+
+    st.text_area("Customized WhatsApp message", message, height=220, key=f"hub_message_{school}")
+    st.subheader("School 360 Report")
+    render_report(report_text)
+    if st.session_state.get(report_key + "::model"):
+        st.caption(f"Gemini model: {st.session_state[report_key + '::model']}. KPI calculations remain deterministic in Python.")
 
 
 # =========================================================
@@ -1087,7 +1228,7 @@ elif page == "School 360":
 
     st.subheader("🧠 School Report")
     action_days = st.radio("Action plan interval", [7, 15], horizontal=True, key="school_action_days")
-    auto_ai = st.checkbox("Auto-generate AI report for this school", value=True, key=f"auto_school_{school}")
+    auto_ai = st.checkbox("Auto-generate AI report for this school", value=False, key=f"auto_school_{school}", help="Keep OFF for fastest browsing; use the Generate button when needed.")
     report_key = f"school_report::{school}::{start_date}::{end_date}::{workdays}::{action_days}"
 
     if report_key not in st.session_state:
@@ -1219,7 +1360,7 @@ elif page == "Teacher 360":
             f"{action_days}-DAY DEVELOPMENT ACTION PLAN\nPrioritize the lowest KPI areas and review verified activity evidence at the next checkpoint."
         )
 
-    auto_teacher = st.checkbox("Auto-generate detailed AI report", value=True, key=f"auto_teacher_{teacher_row['Teacher Key']}")
+    auto_teacher = st.checkbox("Auto-generate detailed AI report", value=False, key=f"auto_teacher_{teacher_row['Teacher Key']}", help="Keep OFF for fastest browsing; use the Generate button when needed.")
     should_generate = auto_teacher and not st.session_state.get(key + "::ai_done", False)
     clicked = st.button("✨ Generate / Refresh Teacher 360 Report", use_container_width=True)
     if should_generate or clicked:
