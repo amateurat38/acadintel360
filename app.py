@@ -158,14 +158,52 @@ def get_supabase():
 sb = get_supabase()
 
 
+
+def _invalidate_generated_outputs():
+    """Remove any derived report/message/PDF state so changed KPI settings are reflected immediately."""
+    prefixes = (
+        "quick_report::",
+        "premium_pack::",
+        "hub_report::",
+        "school_report::",
+        "teacher_report::",
+        "pdf::",
+        "teacher_pdf::",
+        "wa::",
+        "script::",
+    )
+    exact_keys = {
+        "last_generated_message",
+        "last_generated_report",
+    }
+
+    for key in list(st.session_state.keys()):
+        key_text = str(key)
+        if key_text in exact_keys or key_text.startswith(prefixes):
+            try:
+                del st.session_state[key]
+            except Exception:
+                pass
+
+    # AI responses are keyed by prompt content, but clearing them here guarantees
+    # no narrative survives a benchmark change.
+    st.session_state["ai_cache"] = {}
+
+
 def _invalidate_db_cache(table=None):
     cache = st.session_state.setdefault("db_cache", {})
     if table is None:
         cache.clear()
     else:
         cache.pop(table, None)
+
     st.session_state.db_version = int(st.session_state.get("db_version", 0)) + 1
     st.session_state.analytics_cache = {}
+
+    # KPI, roster and shared-account changes affect mathematics and therefore
+    # every downstream report/message/PDF. Force a clean rebuild.
+    if table in (None, "kpi_settings", "master_roster", "shared_accounts"):
+        _invalidate_generated_outputs()
 
 
 def _db_all(table, refresh=False):
@@ -500,6 +538,18 @@ def effective_kpis(school=None):
                 matches.sort(key=lambda x: x.get("updated_at") or x.get("created_at") or "")
                 result[module_key] = safe_float(matches[-1].get("target_minutes_per_day"), result[module_key])
     return result
+
+
+
+def current_kpi_signature(school=None):
+    """Stable signature of the effective KPI configuration used in cache keys."""
+    kpis = effective_kpis(school)
+    return (
+        round(safe_float(kpis.get("lessonDelivery")), 4),
+        round(safe_float(kpis.get("library")), 4),
+        round(safe_float(kpis.get("otherModules")), 4),
+        int(st.session_state.get("db_version", 0)),
+    )
 
 
 def save_kpi(scope, module_key, value, school_name=None):
@@ -2014,21 +2064,37 @@ if page == "⚡ Quick Desk":
 
     priority=school_teachers.sort_values(["Health Score","Total Minutes"]).head(4) if not school_teachers.empty else pd.DataFrame()
     priority_names=", ".join(priority["Teacher"].astype(str).tolist()) if not priority.empty else "No priority teachers identified"
+    live_kpis = effective_kpis(school)
     message=(
         f"Dear Sir/Ma'am,\n\n"
         f"Please find the implementation performance update for {school} for {start_date} to {end_date} ({workdays} working days).\n\n"
         f"📊 Health Score: {school_row['Health Score']}/100\n"
         f"🎯 Full KPI Compliance: {school_row['Overall Compliance %']}%\n"
-        f"👩‍🏫 Active Teachers: {school_row['Active']}/{school_row['Teachers']}\n"
+        f"👩‍🏫 Active Teachers: {school_row['Active']}/{school_row['Teachers']}\n\n"
+        f"Configured KPI Benchmarks used in this report:\n"
+        f"• Lesson Delivery: {live_kpis['lessonDelivery']:.1f} min/day × {workdays} days = {live_kpis['lessonDelivery']*workdays:.1f} min/teacher\n"
+        f"• Library: {live_kpis['library']:.1f} min/day × {workdays} days = {live_kpis['library']*workdays:.1f} min/teacher\n"
+        f"• Other Modules: {live_kpis['otherModules']:.1f} min/day × {workdays} days = {live_kpis['otherModules']*workdays:.1f} min/teacher\n\n"
         f"⚠️ Priority Review: {priority_names}\n\n"
-        f"The attached School 360 pack contains the graphical school dashboard and a separate Teacher 360 report for every teacher, along with evidence-backed action priorities.\n\n"
+        f"The attached School 360 pack contains the graphical school dashboard and a separate Teacher 360 report for every teacher. "
+        f"All mathematics, compliance percentages and Health Scores are recalculated using the currently configured KPI benchmarks.\n\n"
         f"Kindly review the same so that we can align the next implementation actions.\n\n"
         f"Regards,\nDilip Kumar Vishwakarma"
     )
 
-    ai_key=f"quick_report::{school}::{start_date}::{end_date}::{workdays}::{action_days}"
+    kpi_signature = current_kpi_signature(school)
+    ai_key=f"quick_report::{school}::{start_date}::{end_date}::{workdays}::{action_days}::{kpi_signature}"
     ai_text=st.session_state.get(ai_key,"")
-    pdf_key="premium_pack::"+hashlib.sha256((school+str(start_date)+str(end_date)+str(workdays)+str(action_days)+ai_text+str(st.session_state.get('raw_version',0))).encode()).hexdigest()
+    pdf_key="premium_pack::"+hashlib.sha256((
+        school
+        + str(start_date)
+        + str(end_date)
+        + str(workdays)
+        + str(action_days)
+        + ai_text
+        + str(st.session_state.get('raw_version',0))
+        + str(kpi_signature)
+    ).encode()).hexdigest()
     if pdf_key not in st.session_state:
         try:
             st.session_state[pdf_key]=make_premium_school_pack_pdf(school_row,school_teachers,school_raw,start_date,end_date,workdays,action_days,ai_text)
@@ -2217,7 +2283,7 @@ elif page == "__legacy_report_hub__":
 
     action_days = st.radio("Action plan interval", [7, 15], horizontal=True, key="hub_action_days")
     auto_once = st.toggle("Auto-generate once when I open this school", value=False, help="Keep this OFF for maximum speed. Turn it ON only when you want automatic AI generation.")
-    report_key = f"hub_report::{school}::{start_date}::{end_date}::{workdays}::{action_days}"
+    report_key = f"hub_report::{school}::{start_date}::{end_date}::{workdays}::{action_days}::{current_kpi_signature(school)}"
 
     if report_key not in st.session_state:
         st.session_state[report_key] = deterministic_school_summary(school_row, action_days)
@@ -2259,7 +2325,7 @@ elif page == "__legacy_report_hub__":
         f"Regards,\nDilip Kumar Vishwakarma"
     )
 
-    pdf_key = "pdf::" + hashlib.sha256((school + str(start_date) + str(end_date) + report_text).encode("utf-8")).hexdigest()
+    pdf_key = "pdf::" + hashlib.sha256((school + str(start_date) + str(end_date) + report_text + str(current_kpi_signature(school))).encode("utf-8")).hexdigest()
     if pdf_key not in st.session_state:
         st.session_state[pdf_key] = cached_text_pdf(
             f"School 360 Intelligence Report - {school}",
@@ -2379,7 +2445,7 @@ elif page == "School 360":
     st.subheader("🧠 School Report")
     action_days = st.radio("Action plan interval", [7, 15], horizontal=True, key="school_action_days")
     auto_ai = st.checkbox("Auto-generate AI report for this school", value=False, key=f"auto_school_{school}", help="Keep OFF for fastest browsing; use the Generate button when needed.")
-    report_key = f"school_report::{school}::{start_date}::{end_date}::{workdays}::{action_days}"
+    report_key = f"school_report::{school}::{start_date}::{end_date}::{workdays}::{action_days}::{current_kpi_signature(school)}"
 
     if report_key not in st.session_state:
         st.session_state[report_key] = deterministic_school_summary(school_row, action_days)
@@ -2407,7 +2473,7 @@ elif page == "School 360":
     if st.session_state.get(report_key + "::model"):
         st.caption(f"AI narrative generated with {st.session_state[report_key + '::model']}. KPI values are calculated by Python, not Gemini.")
 
-    pdf_key = "pdf::" + hashlib.sha256((school + str(start_date) + str(end_date) + report_text).encode("utf-8")).hexdigest()
+    pdf_key = "pdf::" + hashlib.sha256((school + str(start_date) + str(end_date) + report_text + str(current_kpi_signature(school))).encode("utf-8")).hexdigest()
     if pdf_key not in st.session_state:
         st.session_state[pdf_key] = make_text_pdf(
             f"School 360 Intelligence Report - {school}",
@@ -2505,7 +2571,7 @@ elif page == "Teacher 360":
             st.plotly_chart(px.line(daily, x="ActivityDate", y="Minutes", markers=True, title="Daily Activity Trend"), use_container_width=True)
 
     action_days = st.radio("Development plan interval", [7, 15], horizontal=True, key="teacher_action_days")
-    key = f"teacher_report::{school_filter}::{teacher_name}::{start_date}::{end_date}::{workdays}::{action_days}"
+    key = f"teacher_report::{school_filter}::{teacher_name}::{start_date}::{end_date}::{workdays}::{action_days}::{current_kpi_signature(school_filter)}"
     if key not in st.session_state:
         st.session_state[key] = (
             f"EXECUTIVE DIAGNOSIS\n{teacher_name} has a Health Score of {teacher_row['Health Score']}/100 and status '{teacher_row['Status']}'.\n\n"
@@ -2613,7 +2679,7 @@ elif page == "KPI & Roster":
                 save_kpi("GLOBAL", "lessonDelivery", l)
                 save_kpi("GLOBAL", "library", lib)
                 save_kpi("GLOBAL", "otherModules", oth)
-                st.success("Global KPI benchmarks saved.")
+                st.success("Global KPI benchmarks saved. Mathematics, analytics, PDF reports and customized messages will now rebuild automatically.")
                 st.rerun()
 
         st.info(
@@ -2697,7 +2763,7 @@ elif page == "KPI & Roster":
                     save_kpi("SCHOOL", "lessonDelivery", sl, s)
                     save_kpi("SCHOOL", "library", sLib, s)
                     save_kpi("SCHOOL", "otherModules", so, s)
-                    st.success(f"Local KPI override saved for {s}.")
+                    st.success(f"Local KPI override saved for {s}. Mathematics, analytics, PDF reports and customized messages will now rebuild automatically.")
                     st.rerun()
 
             if detail["has_local_override"]:
@@ -2707,7 +2773,7 @@ elif page == "KPI & Roster":
                     key="reset_school_kpi",
                 ):
                     reset_school_kpis_to_global(s)
-                    st.success(f"{s} will now inherit the Global KPI Benchmarks.")
+                    st.success(f"{s} will now inherit the Global KPI Benchmarks. All downstream calculations and reports will rebuild automatically.")
                     st.rerun()
 
             st.caption(
