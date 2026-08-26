@@ -92,6 +92,11 @@ for key, default in {
     "import_errors": [],
     "ai_cache": {},
     "follow_school": None,
+    "share_follow_school": None,
+    "analytics_cache": {},
+    "db_cache": {},
+    "raw_version": 0,
+    "db_version": 0,
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -1494,7 +1499,7 @@ analytics_key = (
     int(workdays),
 )
 
-_cached = st.session_state.analytics_cache.get(analytics_key)
+_cached = st.session_state.setdefault("analytics_cache", {}).get(analytics_key)
 if _cached is None:
     period_raw = filter_period(st.session_state.raw, start_date, end_date)
     teachers, schools, shared_usage = build_analytics(period_raw, start_date, end_date, workdays)
