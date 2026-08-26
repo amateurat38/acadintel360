@@ -71,7 +71,14 @@ st.markdown(
     div[data-testid="stVerticalBlockBorderWrapper"] {border-radius:18px;}
     .ai-card {border-radius:18px; padding:16px 18px; margin:9px 0; border-left:5px solid #4f46e5; background:#f8fafc;}
     div[data-testid="stButton"] button, div[data-testid="stDownloadButton"] button, div[data-testid="stLinkButton"] a {border-radius:12px; font-weight:700;}
-    </style>
+    
+    html, body, [class*="css"] {font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
+    .insight-box,.success-box,.warning-box{padding:18px 20px;border-radius:18px;min-height:118px;line-height:1.55;box-shadow:0 8px 24px rgba(15,23,42,.05);}
+    .insight-box{background:linear-gradient(135deg,#eef2ff,#f8fafc);border:1px solid #c7d2fe;}
+    .success-box{background:linear-gradient(135deg,#ecfdf5,#f8fafc);border:1px solid #a7f3d0;}
+    .warning-box{background:linear-gradient(135deg,#fff7ed,#fffbeb);border:1px solid #fed7aa;}
+    div[data-testid="stTabs"] button{font-weight:750;}
+</style>
     """,
     unsafe_allow_html=True,
 )
@@ -786,7 +793,7 @@ def deterministic_school_summary(school_row, action_days):
 
 
 # =========================================================
-# REPORT RENDERING + PDF
+# PREMIUM REPORT UI + GRAPHICAL PDF ENGINE
 # =========================================================
 def clean_ai_text(text):
     return (text or "").replace("**", "").replace("###", "").replace("##", "").strip()
@@ -801,108 +808,388 @@ def render_report(text):
     if not matches:
         st.markdown(f'<div class="ai-card">{clean.replace(chr(10), "<br>")}</div>', unsafe_allow_html=True)
         return
+    palette = ["#EEF2FF", "#ECFEFF", "#F0FDF4", "#FFF7ED", "#FDF4FF", "#F8FAFC"]
+    borders = ["#4F46E5", "#0891B2", "#16A34A", "#EA580C", "#A21CAF", "#475569"]
     for i, match in enumerate(matches):
         title = match.group(1).strip()
-        start = match.end()
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(clean)
-        body = clean[start:end].strip()
+        s = match.end()
+        e = matches[i + 1].start() if i + 1 < len(matches) else len(clean)
+        body = clean[s:e].strip()
         if body:
-            st.markdown(
-                f'<div class="ai-card"><b>{title.title()}</b><br><br>{body.replace(chr(10), "<br>")}</div>',
-                unsafe_allow_html=True,
+            bg = palette[i % len(palette)]
+            border = borders[i % len(borders)]
+            html = (
+                f'<div style="background:{bg};border-left:5px solid {border};padding:18px 20px;'
+                f'border-radius:16px;margin:10px 0 14px 0;box-shadow:0 6px 20px rgba(15,23,42,.04)">'
+                f'<div style="font-weight:800;font-size:15px;color:{border};margin-bottom:8px">{title.title()}</div>'
+                f'<div style="line-height:1.62;color:#243045">{body.replace(chr(10), "<br>")}</div></div>'
             )
+            st.markdown(html, unsafe_allow_html=True)
+
+
+def teacher_auto_insights(row, action_days=7):
+    kpis = {
+        "Lesson Delivery": safe_float(row.get("Lesson KPI %")),
+        "Library": safe_float(row.get("Library KPI %")),
+        "Other Modules": safe_float(row.get("Other KPI %")),
+    }
+    strongest = max(kpis, key=kpis.get)
+    weakest = min(kpis, key=kpis.get)
+    total = safe_float(row.get("Total Minutes"))
+    active_days = int(safe_float(row.get("Active Days")))
+    eligible = max(1, int(safe_float(row.get("Eligible Working Days"))))
+    consistency = round(active_days / eligible * 100, 1)
+    if total <= 0:
+        diagnosis = "No measurable platform activity was recorded in the selected review period."
+        strength = "The roster provides a clear baseline for a structured activation plan."
+        focus = "First login, guided navigation and the first measurable usage checkpoint."
+    else:
+        diagnosis = f"Recorded {total:.1f} minutes across {active_days} active day(s), giving {consistency:.1f}% activity-day consistency."
+        strength = f"Relative strength: {strongest} at {kpis[strongest]:.1f}% of the configured KPI."
+        focus = f"Primary focus: {weakest}, currently at {kpis[weakest]:.1f}% of the configured KPI."
+    plan = (
+        f"For the next {action_days} days: establish a daily usage rhythm, prioritize {weakest}, "
+        "use the relevant classroom/content workflow, and verify improvement at the next review using the same KPI denominator."
+    )
+    return diagnosis, strength, focus, plan
+
+
+def render_graphical_school_report(school_row, school_teachers, school_raw, workdays, action_days):
+    teacher_count = max(1, int(safe_float(school_row.get("Teachers"))))
+    kpi_df = pd.DataFrame({
+        "KPI": ["Lesson Delivery", "Library", "Other Modules"],
+        "Actual": [
+            safe_float(school_row.get("Lesson Delivery Minutes")),
+            safe_float(school_row.get("Library Minutes")),
+            safe_float(school_row.get("Other Modules Minutes")),
+        ],
+        "Target": [
+            safe_float(school_row.get("Lesson Target / Day")) * workdays * teacher_count,
+            safe_float(school_row.get("Library Target / Day")) * workdays * teacher_count,
+            safe_float(school_row.get("Other Target / Day")) * workdays * teacher_count,
+        ],
+    })
+    kpi_df["Achievement %"] = (kpi_df["Actual"] / kpi_df["Target"].replace(0, pd.NA) * 100).fillna(0).round(1)
+
+    st.markdown("### Performance cockpit")
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Institution Health", f"{safe_float(school_row.get('Health Score')):.0f}/100")
+    k2.metric("Full KPI Compliance", f"{safe_float(school_row.get('Overall Compliance %')):.1f}%")
+    k3.metric("Active Teachers", f"{int(safe_float(school_row.get('Active')))}/{teacher_count}")
+    k4.metric("Met All KPIs", int(safe_float(school_row.get("Met All KPIs"))))
+
+    left, right = st.columns([1.15, 1])
+    with left:
+        fig = px.bar(
+            kpi_df.melt(id_vars=["KPI", "Achievement %"], value_vars=["Actual", "Target"], var_name="Measure", value_name="Minutes"),
+            x="KPI", y="Minutes", color="Measure", barmode="group", text_auto=".0f",
+            color_discrete_map={"Actual": "#4F46E5", "Target": "#CBD5E1"},
+            title="KPI delivery: actual vs review-period target",
+        )
+        fig.update_layout(margin=dict(l=10, r=10, t=55, b=10), legend_title_text="")
+        st.plotly_chart(fig, use_container_width=True)
+    with right:
+        if not school_teachers.empty:
+            rank = school_teachers.sort_values("Health Score", ascending=True).tail(12)
+            fig2 = px.bar(
+                rank, x="Health Score", y="Teacher", orientation="h", color="Health Score",
+                color_continuous_scale=["#FCA5A5", "#FBBF24", "#34D399"], range_color=[0, 100],
+                text="Health Score", title="Teacher health ranking",
+            )
+            fig2.update_layout(coloraxis_showscale=False, margin=dict(l=10, r=10, t=55, b=10))
+            st.plotly_chart(fig2, use_container_width=True)
+
+    left, right = st.columns([1, 1])
+    with left:
+        if not school_raw.empty:
+            module = school_raw.groupby("Raw Module", as_index=False)["Minutes"].sum().sort_values("Minutes", ascending=False).head(10)
+            fig3 = px.bar(module.sort_values("Minutes"), x="Minutes", y="Raw Module", orientation="h", text_auto=".1f", title="Module adoption mix")
+            fig3.update_layout(margin=dict(l=10, r=10, t=55, b=10), showlegend=False)
+            st.plotly_chart(fig3, use_container_width=True)
+    with right:
+        status = school_teachers["Status"].value_counts().rename_axis("Status").reset_index(name="Teachers") if not school_teachers.empty else pd.DataFrame()
+        if not status.empty:
+            fig4 = px.pie(status, names="Status", values="Teachers", hole=.58, title="Teacher implementation status")
+            fig4.update_layout(margin=dict(l=10, r=10, t=55, b=10))
+            st.plotly_chart(fig4, use_container_width=True)
+
+    st.markdown("### Teacher scorecard")
+    if not school_teachers.empty:
+        view = school_teachers[[
+            "Teacher", "Status", "Health Score", "Lesson KPI %", "Library KPI %", "Other KPI %",
+            "Total Minutes", "Active Days", "Books Used", "Grades Covered", "Subjects Covered"
+        ]].sort_values(["Health Score", "Total Minutes"], ascending=[True, True])
+        st.dataframe(view, use_container_width=True, hide_index=True, height=min(520, 90 + len(view) * 36))
+
+    st.markdown("### Action organizer")
+    low = school_teachers.sort_values(["Health Score", "Total Minutes"]).head(5) if not school_teachers.empty else pd.DataFrame()
+    high = school_teachers.sort_values(["Health Score", "Total Minutes"], ascending=False).head(3) if not school_teachers.empty else pd.DataFrame()
+    a, b, c = st.columns(3)
+    with a:
+        st.markdown('<div class="insight-box"><b>Protect</b><br>' + (", ".join(high["Teacher"].astype(str).tolist()) if not high.empty else "No benchmark teachers yet") + '<br><span>Recognise relatively stronger implementation and capture repeatable practices.</span></div>', unsafe_allow_html=True)
+    with b:
+        st.markdown('<div class="warning-box"><b>Prioritise</b><br>' + (", ".join(low["Teacher"].astype(str).tolist()) if not low.empty else "No priority teachers") + '<br><span>Review the lowest KPI, activity-day consistency and evidence before the next follow-up.</span></div>', unsafe_allow_html=True)
+    with c:
+        st.markdown(f'<div class="success-box"><b>{action_days}-day checkpoint</b><br>Re-run the same review period logic after the intervention.<br><span>Compare KPI %, active days and module breadth teacher by teacher.</span></div>', unsafe_allow_html=True)
 
 
 class ReportPDF(FPDF):
     def header(self):
-        self.set_fill_color(67, 56, 202)
-        self.rect(0, 0, 210, 24, "F")
-        self.set_text_color(255, 255, 255)
+        bands = [(31,41,55),(49,46,129),(67,56,202),(79,70,229),(59,130,246),(14,165,233)]
+        width = 210 / len(bands)
+        for i, rgb in enumerate(bands):
+            self.set_fill_color(*rgb)
+            self.rect(i * width, 0, width + 0.5, 24, "F")
+        self.set_text_color(255,255,255)
         self.set_font("Helvetica", "B", 16)
-        self.set_xy(12, 7)
-        self.cell(0, 8, "AcadIntel 360", 0, 1)
+        self.set_xy(12,6)
+        self.cell(0,7,"AcadIntel 360",0,1)
         self.set_font("Helvetica", "", 8)
         self.set_x(12)
-        self.cell(0, 4, "Academic Intelligence - Evidence - Action", 0, 1)
-        self.set_text_color(20, 20, 20)
+        self.cell(0,4,"Academic Intelligence  |  Evidence  |  Action",0,1)
+        self.set_text_color(31,41,55)
 
     def footer(self):
-        self.set_y(-12)
-        self.set_text_color(100, 100, 100)
-        self.set_font("Helvetica", "", 8)
-        self.cell(0, 6, f"Generated {datetime.now().strftime('%d %b %Y %H:%M')} | Page {self.page_no()}", 0, 0, "C")
+        self.set_y(-11)
+        self.set_draw_color(226,232,240)
+        self.line(12, self.get_y(), 198, self.get_y())
+        self.set_y(-9)
+        self.set_font("Helvetica", "", 7.5)
+        self.set_text_color(100,116,139)
+        self.cell(0,5,f"Confidential academic implementation report  |  Page {self.page_no()}",0,0,"C")
 
 
 def pdf_safe(value):
     return str(value).encode("latin-1", "replace").decode("latin-1")
 
 
-def make_text_pdf(title, subtitle, report_text, evidence_df=None):
-    pdf = ReportPDF()
-    pdf.set_auto_page_break(True, 15)
-    pdf.add_page()
-    pdf.ln(18)
-    pdf.set_font("Helvetica", "B", 16)
-    pdf.set_x(pdf.l_margin)
-    pdf.multi_cell(pdf.epw, 8, pdf_safe(title))
-    pdf.set_x(pdf.l_margin)
-    pdf.set_font("Helvetica", "", 9)
-    pdf.multi_cell(pdf.epw, 5, pdf_safe(subtitle))
-    pdf.set_x(pdf.l_margin)
+def pdf_card(pdf, x, y, w, h, label, value, accent=(79,70,229)):
+    pdf.set_fill_color(248,250,252)
+    pdf.set_draw_color(226,232,240)
+    pdf.rect(x, y, w, h, style="DF", round_corners=True, corner_radius=2.5)
+    pdf.set_fill_color(*accent)
+    pdf.rect(x, y, 2.2, h, style="F", round_corners=True, corner_radius=1)
+    pdf.set_xy(x+5, y+4)
+    pdf.set_font("Helvetica", "", 7.5)
+    pdf.set_text_color(100,116,139)
+    pdf.cell(w-7,4,pdf_safe(label),0,1)
+    pdf.set_xy(x+5,y+9)
+    pdf.set_font("Helvetica","B",12)
+    pdf.set_text_color(30,41,59)
+    pdf.cell(w-7,7,pdf_safe(str(value)[:22]),0,0)
+
+
+def pdf_section_title(pdf, title, subtitle=None):
+    if pdf.get_y() > 260:
+        pdf.add_page(); pdf.ln(17)
+    pdf.set_fill_color(238,242,255)
+    pdf.set_text_color(67,56,202)
+    pdf.set_font("Helvetica","B",10.5)
+    x=pdf.l_margin; y=pdf.get_y()
+    pdf.rect(x,y,pdf.epw,8,style="F", round_corners=True, corner_radius=2)
+    pdf.set_xy(x+4,y+2)
+    pdf.cell(pdf.epw-8,4,pdf_safe(title),0,1)
+    pdf.set_y(y+10)
+    if subtitle:
+        pdf.set_font("Helvetica","",7.5); pdf.set_text_color(100,116,139)
+        pdf.set_x(x); pdf.multi_cell(pdf.epw,4,pdf_safe(subtitle)); pdf.set_x(x)
+
+
+def pdf_progress(pdf, label, pct, x=None, y=None, w=84, show_value=True):
+    x = pdf.get_x() if x is None else x
+    y = pdf.get_y() if y is None else y
+    pct = max(0.0, safe_float(pct))
+    capped = min(pct, 100.0)
+    pdf.set_xy(x,y)
+    pdf.set_font("Helvetica","",7.5); pdf.set_text_color(51,65,85)
+    pdf.cell(w,4,pdf_safe(label),0,0)
+    if show_value:
+        pdf.set_xy(x+w-20,y); pdf.set_font("Helvetica","B",7.5)
+        pdf.cell(20,4,f"{pct:.1f}%",0,0,"R")
+    bar_y=y+5
+    pdf.set_fill_color(226,232,240); pdf.rect(x,bar_y,w,4,style="F", round_corners=True, corner_radius=2)
+    if capped < 40: rgb=(239,68,68)
+    elif capped < 75: rgb=(245,158,11)
+    else: rgb=(16,185,129)
+    pdf.set_fill_color(*rgb)
+    if capped>0: pdf.rect(x,bar_y,max(1,w*capped/100),4,style="F", round_corners=True, corner_radius=2)
+    return bar_y+7
+
+
+def pdf_hbar_chart(pdf, title, rows, max_value=None, height_each=8):
+    pdf_section_title(pdf,title)
+    if not rows:
+        pdf.set_font("Helvetica","",8); pdf.set_text_color(100,116,139); pdf.cell(0,6,"No measurable data available.",0,1); return
+    max_value = max_value or max(v for _,v in rows) or 1
+    max_value = max(max_value,1)
+    label_w=52; bar_w=110
+    for label,value in rows:
+        if pdf.get_y()>264: pdf.add_page(); pdf.ln(17)
+        y=pdf.get_y()
+        pdf.set_font("Helvetica","",7.2); pdf.set_text_color(51,65,85); pdf.set_xy(pdf.l_margin,y)
+        pdf.cell(label_w,5,pdf_safe(str(label)[:31]),0,0)
+        x=pdf.l_margin+label_w
+        pdf.set_fill_color(241,245,249); pdf.rect(x,y+1,bar_w,4,style="F", round_corners=True, corner_radius=1.5)
+        fill=max(0,min(bar_w,bar_w*safe_float(value)/max_value))
+        pdf.set_fill_color(79,70,229)
+        if fill>0: pdf.rect(x,y+1,max(1,fill),4,style="F", round_corners=True, corner_radius=1.5)
+        pdf.set_xy(x+bar_w+3,y); pdf.set_font("Helvetica","B",7.2); pdf.cell(18,5,f"{safe_float(value):.1f}",0,0,"R")
+        pdf.set_y(y+height_each)
+
+
+def pdf_note_box(pdf, title, body, kind="info"):
+    palette={"info":((239,246,255),(37,99,235)),"success":((240,253,244),(22,163,74)),"warning":((255,247,237),(234,88,12)),"purple":((245,243,255),(124,58,237))}
+    bg,accent=palette.get(kind,palette["info"])
+    body=pdf_safe(body)
+    lines=max(2, len(body)//95 + body.count("\n") + 1)
+    h=min(38,10+lines*4.2)
+    if pdf.get_y()+h>270: pdf.add_page(); pdf.ln(17)
+    x=pdf.l_margin; y=pdf.get_y()
+    pdf.set_fill_color(*bg); pdf.set_draw_color(*accent); pdf.rect(x,y,pdf.epw,h,style="DF", round_corners=True, corner_radius=2.5)
+    pdf.set_fill_color(*accent); pdf.rect(x,y,2,h,style="F", round_corners=True, corner_radius=1)
+    pdf.set_xy(x+5,y+3); pdf.set_text_color(*accent); pdf.set_font("Helvetica","B",8.5); pdf.cell(pdf.epw-10,4,pdf_safe(title),0,1)
+    pdf.set_xy(x+5,y+8); pdf.set_text_color(51,65,85); pdf.set_font("Helvetica","",7.5); pdf.multi_cell(pdf.epw-10,4,pdf_safe(body)); pdf.set_y(y+h+3)
+
+
+def add_signature(pdf, signature_name="Dilip Kumar Vishwakarma"):
+    if pdf.get_y()>245: pdf.add_page(); pdf.ln(17)
+    pdf.ln(4)
+    pdf.set_draw_color(203,213,225); pdf.line(pdf.l_margin,pdf.get_y(),pdf.l_margin+70,pdf.get_y())
+    pdf.ln(3)
+    pdf.set_font("Helvetica","B",9); pdf.set_text_color(31,41,55); pdf.cell(0,5,pdf_safe(signature_name),0,1)
+    pdf.set_font("Helvetica","",7.5); pdf.set_text_color(100,116,139); pdf.cell(0,4,"Academic Consultant | OneLern Academic Team",0,1)
+
+
+def add_teacher_report_page(pdf, row, evidence, start_date, end_date, action_days):
+    pdf.add_page(); pdf.ln(17)
+    pdf.set_text_color(15,23,42); pdf.set_font("Helvetica","B",16)
+    pdf.cell(0,8,pdf_safe(row.get("Teacher","Teacher 360")),0,1)
+    pdf.set_font("Helvetica","",8); pdf.set_text_color(100,116,139)
+    pdf.cell(0,5,pdf_safe(f"Teacher 360 | {row.get('School','')} | {start_date} to {end_date}"),0,1)
     pdf.ln(3)
 
-    for block in clean_ai_text(report_text).split("\n\n"):
-        block = block.strip()
-        if not block:
-            continue
-        lines = block.splitlines()
-        if len(lines) > 1 and lines[0].strip().isupper():
-            pdf.set_fill_color(242, 244, 255)
-            pdf.set_font("Helvetica", "B", 10)
-            pdf.set_x(pdf.l_margin)
-            pdf.multi_cell(pdf.epw, 7, pdf_safe(lines[0].strip()), fill=True)
-            pdf.set_x(pdf.l_margin)
-            pdf.set_font("Helvetica", "", 9)
-            pdf.multi_cell(pdf.epw, 5.5, pdf_safe("\n".join(lines[1:])))
-            pdf.set_x(pdf.l_margin)
-        else:
-            pdf.set_font("Helvetica", "", 9)
-            pdf.set_x(pdf.l_margin)
-            pdf.multi_cell(pdf.epw, 5.5, pdf_safe(block))
-            pdf.set_x(pdf.l_margin)
-        pdf.ln(2)
+    y=pdf.get_y(); gap=3; w=(pdf.epw-gap*3)/4
+    cards=[
+        ("Health",f"{safe_float(row.get('Health Score')):.0f}/100",(79,70,229)),
+        ("Active Days",f"{int(safe_float(row.get('Active Days')))}/{int(safe_float(row.get('Eligible Working Days')))}",(14,165,233)),
+        ("Total Usage",f"{safe_float(row.get('Total Minutes')):.1f} min",(16,185,129)),
+        ("Status",str(row.get('Status','')), (245,158,11)),
+    ]
+    for i,(lab,val,acc) in enumerate(cards): pdf_card(pdf,pdf.l_margin+i*(w+gap),y,w,19,lab,val,acc)
+    pdf.set_y(y+24)
 
-    if evidence_df is not None and not evidence_df.empty:
-        pdf.add_page()
-        pdf.ln(18)
-        pdf.set_font("Helvetica", "B", 12)
-        pdf.cell(0, 7, "Evidence Audit Trail", 0, 1)
-        cols = ["DateTime", "Raw Module", "Grade", "Subject", "Book", "Minutes"]
-        widths = [27, 32, 20, 32, 65, 14]
-        pdf.set_font("Helvetica", "B", 7)
-        for c, w in zip(cols, widths):
-            pdf.cell(w, 6, c.replace("DateTime", "Date"), 1, 0, "C")
-        pdf.ln()
-        pdf.set_font("Helvetica", "", 6.3)
-        for _, row in evidence_df.sort_values("DateTime", ascending=False).head(150).iterrows():
-            vals = [str(row.get(c, "")) for c in cols]
-            vals[0] = vals[0][:16]
-            vals[1] = vals[1][:18]
-            vals[2] = vals[2][:12]
-            vals[3] = vals[3][:18]
-            vals[4] = vals[4][:36]
-            vals[5] = f"{safe_float(row.get('Minutes')):.1f}"
-            for value, w in zip(vals, widths):
-                pdf.cell(w, 5.5, pdf_safe(value), 1, 0, "L")
-            pdf.ln()
+    pdf_section_title(pdf,"KPI SCORECARD","Configured KPI achievement for the selected review period")
+    y=pdf.get_y()
+    y=pdf_progress(pdf,"Lesson Delivery",row.get("Lesson KPI %"),pdf.l_margin,y,pdf.epw)
+    y=pdf_progress(pdf,"Library",row.get("Library KPI %"),pdf.l_margin,y+2,pdf.epw)
+    y=pdf_progress(pdf,"Other Modules",row.get("Other KPI %"),pdf.l_margin,y+2,pdf.epw)
+    pdf.set_y(y+4)
+
+    diagnosis,strength,focus,plan=teacher_auto_insights(row,action_days)
+    pdf_note_box(pdf,"Performance diagnosis",diagnosis,"info")
+    pdf_note_box(pdf,"Relative strength",strength,"success")
+    pdf_note_box(pdf,"Priority focus",focus,"warning")
+
+    if evidence is not None and not evidence.empty:
+        module_rows=evidence.groupby("Raw Module")["Minutes"].sum().sort_values(ascending=False).head(8)
+        pdf_hbar_chart(pdf,"MODULE UTILISATION",[(str(k),safe_float(v)) for k,v in module_rows.items()])
+        daily=evidence.dropna(subset=["DateTime"]).copy()
+        if not daily.empty:
+            daily["_day"]=daily["DateTime"].dt.strftime("%d %b")
+            d=daily.groupby("_day",sort=False)["Minutes"].sum().tail(12)
+            pdf_hbar_chart(pdf,"RECENT ACTIVITY DAYS",[(str(k),safe_float(v)) for k,v in d.items()])
+
+    pdf_note_box(pdf,f"{action_days}-day development plan",plan,"purple")
+    pdf_note_box(pdf,"Closing note","The next review should compare the same verified KPIs, active-day consistency and content breadth. Improvement should be recognised where evidence confirms progress.","success")
+    add_signature(pdf)
+
+
+def make_premium_school_pack_pdf(school_row, teacher_data, raw_school, start_date, end_date, workdays, action_days=7, ai_text="", signature_name="Dilip Kumar Vishwakarma"):
+    pdf=ReportPDF(); pdf.set_auto_page_break(True,14); pdf.set_margins(12,12,12)
+    pdf.add_page(); pdf.ln(17)
+    school=str(school_row.get("School","School"))
+    pdf.set_font("Helvetica","B",18); pdf.set_text_color(15,23,42); pdf.cell(0,9,pdf_safe("School 360 Intelligence Report"),0,1)
+    pdf.set_font("Helvetica","B",12); pdf.set_text_color(67,56,202); pdf.cell(0,7,pdf_safe(school),0,1)
+    pdf.set_font("Helvetica","",8); pdf.set_text_color(100,116,139); pdf.cell(0,5,pdf_safe(f"Review period: {start_date} to {end_date}  |  Working days: {workdays}  |  Teacher reports included: {len(teacher_data)}"),0,1)
+    pdf.ln(3)
+
+    y=pdf.get_y(); gap=3; w=(pdf.epw-gap*3)/4
+    school_cards=[
+        ("Health Score",f"{safe_float(school_row.get('Health Score')):.0f}/100",(79,70,229)),
+        ("Full Compliance",f"{safe_float(school_row.get('Overall Compliance %')):.1f}%",(14,165,233)),
+        ("Active Teachers",f"{int(safe_float(school_row.get('Active')))}/{int(safe_float(school_row.get('Teachers')))}",(16,185,129)),
+        ("Met All KPIs",str(int(safe_float(school_row.get('Met All KPIs')))),(245,158,11)),
+    ]
+    for i,(lab,val,acc) in enumerate(school_cards): pdf_card(pdf,pdf.l_margin+i*(w+gap),y,w,19,lab,val,acc)
+    pdf.set_y(y+24)
+
+    teacher_count=max(1,int(safe_float(school_row.get("Teachers"))))
+    targets={
+        "Lesson Delivery":safe_float(school_row.get("Lesson Target / Day"))*workdays*teacher_count,
+        "Library":safe_float(school_row.get("Library Target / Day"))*workdays*teacher_count,
+        "Other Modules":safe_float(school_row.get("Other Target / Day"))*workdays*teacher_count,
+    }
+    actuals={
+        "Lesson Delivery":safe_float(school_row.get("Lesson Delivery Minutes")),
+        "Library":safe_float(school_row.get("Library Minutes")),
+        "Other Modules":safe_float(school_row.get("Other Modules Minutes")),
+    }
+    pdf_section_title(pdf,"INSTITUTIONAL KPI SCORECARD","Actual usage against configured cumulative school targets")
+    y=pdf.get_y()
+    for label in ["Lesson Delivery","Library","Other Modules"]:
+        pct=actuals[label]/targets[label]*100 if targets[label] else 0
+        y=pdf_progress(pdf,f"{label}  {actuals[label]:.1f}/{targets[label]:.1f} min",pct,pdf.l_margin,y,pdf.epw)
+        y+=2
+    pdf.set_y(y+2)
+
+    if not teacher_data.empty:
+        health=teacher_data.sort_values("Health Score",ascending=False).head(12)
+        pdf_hbar_chart(pdf,"TEACHER HEALTH RANKING",[(str(r["Teacher"]),safe_float(r["Health Score"])) for _,r in health.iterrows()],max_value=100)
+
+    if raw_school is not None and not raw_school.empty:
+        modules=raw_school.groupby("Raw Module")["Minutes"].sum().sort_values(ascending=False).head(10)
+        pdf_hbar_chart(pdf,"MODULE ADOPTION",[(str(k),safe_float(v)) for k,v in modules.items()])
+
+    if not teacher_data.empty:
+        priority=teacher_data.sort_values(["Health Score","Total Minutes"]).head(5)
+        top=teacher_data.sort_values(["Health Score","Total Minutes"],ascending=False).head(3)
+        pdf_note_box(pdf,"Implementation strengths",("Relatively stronger current performers: "+", ".join(top["Teacher"].astype(str).tolist())+". These teachers can be used as implementation reference points while retaining evidence-based review."),"success")
+        pdf_note_box(pdf,"Priority attention",("Priority teachers based on lowest current health/usage: "+", ".join(priority["Teacher"].astype(str).tolist())+". Review their lowest KPI, activity-day consistency and granular evidence before assigning intervention."),"warning")
+    pdf_note_box(pdf,f"{action_days}-day institutional action organizer",f"Days 1-2: validate teacher-level gaps and obtain commitments. Days 3-5: reinforce the lowest-adoption workflow with evidence-based practice. Days 6-{action_days}: track active days and KPI progress. At the checkpoint, compare the same metrics teacher by teacher and document movement.","purple")
+
+    if ai_text:
+        excerpt=clean_ai_text(ai_text)[:1800]
+        pdf_note_box(pdf,"AI interpretation (verified-facts constrained)",excerpt,"info")
+
+    pdf_note_box(pdf,"Closing note","This report converts usage evidence into focused academic implementation action. The next review should recognise improvement, isolate persistent gaps and agree measurable commitments with school leadership.","success")
+    add_signature(pdf,signature_name)
+
+    if not teacher_data.empty:
+        for _,row in teacher_data.sort_values("Teacher").iterrows():
+            evidence=raw_school[raw_school["Teacher Key"]==row.get("Teacher Key")].copy() if raw_school is not None and not raw_school.empty else pd.DataFrame(columns=USAGE_COLUMNS)
+            add_teacher_report_page(pdf,row,evidence,start_date,end_date,action_days)
 
     return bytes(pdf.output())
 
 
-@st.cache_data(show_spinner=False, max_entries=80)
+def make_premium_teacher_pdf(teacher_row, evidence, start_date, end_date, action_days=7):
+    pdf=ReportPDF(); pdf.set_auto_page_break(True,14); pdf.set_margins(12,12,12)
+    add_teacher_report_page(pdf,teacher_row,evidence,start_date,end_date,action_days)
+    return bytes(pdf.output())
+
+
+@st.cache_data(show_spinner=False, max_entries=60)
 def cached_text_pdf(title, subtitle, report_text):
-    """Build a PDF once per unique report. Keeps normal navigation fast."""
-    return make_text_pdf(title, subtitle, report_text)
+    pdf=ReportPDF(); pdf.set_auto_page_break(True,14); pdf.set_margins(12,12,12); pdf.add_page(); pdf.ln(17)
+    pdf.set_font("Helvetica","B",16); pdf.set_text_color(15,23,42); pdf.set_x(pdf.l_margin); pdf.multi_cell(pdf.epw,8,pdf_safe(title)); pdf.set_x(pdf.l_margin)
+    pdf.set_font("Helvetica","",8); pdf.set_text_color(100,116,139); pdf.multi_cell(pdf.epw,5,pdf_safe(subtitle)); pdf.set_x(pdf.l_margin); pdf.ln(3)
+    pdf_note_box(pdf,"Report",clean_ai_text(report_text),"info")
+    add_signature(pdf)
+    return bytes(pdf.output())
+
+
+def make_text_pdf(title, subtitle, report_text, evidence_df=None):
+    return cached_text_pdf(title, subtitle, report_text)
 
 
 # =========================================================
@@ -1015,160 +1302,142 @@ if st.session_state.raw.empty and roster_dataframe().empty:
 
 
 # =========================================================
-# QUICK DESK - DAILY OPERATIONS IN ONE SCREEN
+# QUICK DESK - PREMIUM DAILY CONTROL DESK
 # =========================================================
 if page == "⚡ Quick Desk":
     st.markdown(
-        '<div class="hero"><h1>⚡ Quick Desk</h1><p>Select a school once. Report, PDF, WhatsApp, call, group and follow-up stay within one screen.</p></div>',
+        '<div class="hero"><h1>⚡ AcadIntel Control Desk</h1><p>School insight, graphical report, every Teacher 360, PDF, WhatsApp, call and follow-up — from one screen.</p></div>',
         unsafe_allow_html=True,
     )
-
     if schools.empty:
         st.warning("No school data is available for the selected review period. Upload and process UserMetrics first.")
         st.stop()
 
-    school = st.selectbox("🏫 School", schools["School"].tolist(), key="quick_school")
-    school_row = schools[schools["School"] == school].iloc[0]
-    school_teachers = teachers[teachers["School"] == school].copy()
-    school_raw = period_raw[period_raw["School"] == school].copy()
-    facts = school_verified_facts(school_row, school_teachers, school_raw, start_date, end_date, workdays)
+    top1, top2 = st.columns([2.2,1])
+    with top1:
+        school = st.selectbox("🏫 Select school", schools["School"].tolist(), key="quick_school")
+    with top2:
+        action_days = st.selectbox("🎯 Action plan", [7,15], format_func=lambda x:f"{x}-day plan", key="quick_action_days")
+    action_days=int(action_days)
 
-    contact_rows = db_select("schools", {"school_name": school})
-    contact = contact_rows[0] if contact_rows else {}
-    phone = str(contact.get("contact_phone") or "")
-    group_url = str(contact.get("whatsapp_group_url") or "")
-    clean_phone = re.sub(r"\D", "", phone)
+    school_row=schools[schools["School"]==school].iloc[0]
+    school_teachers=teachers[teachers["School"]==school].copy()
+    school_raw=period_raw[period_raw["School"]==school].copy()
+    facts=school_verified_facts(school_row,school_teachers,school_raw,start_date,end_date,workdays)
 
-    m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("Health", f"{school_row['Health Score']}/100")
-    m2.metric("Compliance", f"{school_row['Overall Compliance %']}%")
-    m3.metric("Active", f"{school_row['Active']}/{school_row['Teachers']}")
-    m4.metric("Inactive", school_row["Inactive / Never Logged In"])
-    m5.metric("Working Days", workdays)
+    contact_rows=db_select("schools",{"school_name":school})
+    contact=contact_rows[0] if contact_rows else {}
+    phone=str(contact.get("contact_phone") or "")
+    group_url=str(contact.get("whatsapp_group_url") or "")
+    clean_phone=re.sub(r"\D","",phone)
 
-    action_days = st.segmented_control(
-        "Action plan", options=[7, 15], default=7, format_func=lambda x: f"{x} days", key="quick_action_days"
-    ) if hasattr(st, "segmented_control") else st.radio(
-        "Action plan", [7, 15], horizontal=True, key="quick_action_days"
-    )
-    action_days = int(action_days or 7)
-
-    base_report = deterministic_school_summary(school_row, action_days)
-    report_key = f"quick_report::{school}::{start_date}::{end_date}::{workdays}::{action_days}"
-    if report_key not in st.session_state:
-        st.session_state[report_key] = base_report
-    report_text = st.session_state[report_key]
-
-    priority = school_teachers.sort_values(["Health Score", "Total Minutes"]).head(4) if not school_teachers.empty else pd.DataFrame()
-    priority_names = ", ".join(priority["Teacher"].astype(str).tolist()) if not priority.empty else "No priority teachers identified"
-    message = (
+    priority=school_teachers.sort_values(["Health Score","Total Minutes"]).head(4) if not school_teachers.empty else pd.DataFrame()
+    priority_names=", ".join(priority["Teacher"].astype(str).tolist()) if not priority.empty else "No priority teachers identified"
+    message=(
         f"Dear Sir/Ma'am,\n\n"
         f"Please find the implementation performance update for {school} for {start_date} to {end_date} ({workdays} working days).\n\n"
         f"📊 Health Score: {school_row['Health Score']}/100\n"
         f"🎯 Full KPI Compliance: {school_row['Overall Compliance %']}%\n"
         f"👩‍🏫 Active Teachers: {school_row['Active']}/{school_row['Teachers']}\n"
         f"⚠️ Priority Review: {priority_names}\n\n"
-        f"The report contains module-wise evidence, teacher-level implementation gaps and a {action_days}-day action plan. "
+        f"The attached School 360 pack contains the graphical school dashboard and a separate Teacher 360 report for every teacher, along with evidence-backed action priorities.\n\n"
         f"Kindly review the same so that we can align the next implementation actions.\n\n"
         f"Regards,\nDilip Kumar Vishwakarma"
     )
 
-    # PDF is deterministic and cached: available immediately without Gemini/network wait.
-    try:
-        pdf_bytes = cached_text_pdf(
-            f"School 360 Intelligence Report - {school}",
-            f"Review Period: {start_date} to {end_date} | Working Days: {workdays}",
-            report_text,
-        )
-        pdf_error = None
-    except Exception as exc:
-        pdf_bytes = None
-        pdf_error = str(exc)
+    ai_key=f"quick_report::{school}::{start_date}::{end_date}::{workdays}::{action_days}"
+    ai_text=st.session_state.get(ai_key,"")
+    pdf_key="premium_pack::"+hashlib.sha256((school+str(start_date)+str(end_date)+str(workdays)+str(action_days)+ai_text+str(st.session_state.get('raw_version',0))).encode()).hexdigest()
+    if pdf_key not in st.session_state:
+        try:
+            st.session_state[pdf_key]=make_premium_school_pack_pdf(school_row,school_teachers,school_raw,start_date,end_date,workdays,action_days,ai_text)
+            st.session_state[pdf_key+"::error"]=""
+        except Exception as exc:
+            st.session_state[pdf_key]=None
+            st.session_state[pdf_key+"::error"]=str(exc)
+    pdf_bytes=st.session_state[pdf_key]
 
-    st.markdown("#### 🚀 One-Tap Actions")
-    q1, q2, q3, q4, q5 = st.columns(5)
-    if pdf_bytes is not None:
-        q1.download_button(
-            "⬇ PDF", data=pdf_bytes,
-            file_name=re.sub(r"[^A-Za-z0-9]+", "_", school) + "_School_360.pdf",
-            mime="application/pdf", use_container_width=True,
-        )
+    st.markdown("### 🚀 One-tap actions")
+    a1,a2,a3,a4,a5=st.columns(5)
+    if pdf_bytes:
+        a1.download_button("⬇ Full PDF Pack",pdf_bytes,file_name=re.sub(r"[^A-Za-z0-9]+","_",school)+"_360_Full_Report.pdf",mime="application/pdf",use_container_width=True,help="School overview + a separate Teacher 360 report for every teacher in one PDF.")
     else:
-        q1.button("⬇ PDF unavailable", disabled=True, use_container_width=True)
+        a1.button("⬇ PDF unavailable",disabled=True,use_container_width=True)
+    a2.link_button("💬 WhatsApp","https://wa.me/?text="+urllib.parse.quote(message),use_container_width=True)
+    if group_url: a3.link_button("👥 School Group",group_url,use_container_width=True)
+    else: a3.button("👥 Add Group",disabled=True,use_container_width=True)
+    if clean_phone: a4.link_button("📞 Call KDM",f"tel:+{clean_phone}",use_container_width=True)
+    else: a4.button("📞 Add Number",disabled=True,use_container_width=True)
+    if a5.button("📅 Follow Up",use_container_width=True): st.session_state.follow_school=school
+    if st.session_state.follow_school==school: followup_dialog(school)
+    if st.session_state.get(pdf_key+"::error"): st.error("PDF could not be prepared: "+st.session_state[pdf_key+"::error"])
 
-    q2.link_button(
-        "💬 WhatsApp", "https://wa.me/?text=" + urllib.parse.quote(message),
-        use_container_width=True,
-    )
-    if group_url:
-        q3.link_button("👥 Group", group_url, use_container_width=True)
-    else:
-        q3.button("👥 Add Group", disabled=True, use_container_width=True)
-    if clean_phone:
-        q4.link_button("📞 Call", f"tel:+{clean_phone}", use_container_width=True)
-    else:
-        q4.button("📞 Add Number", disabled=True, use_container_width=True)
-    if q5.button("📅 Follow Up", use_container_width=True):
-        st.session_state.follow_school = school
+    tabs=st.tabs(["📊 Report Dashboard","👩‍🏫 Teacher Reports","✨ AI Interpretation","💬 Communication"])
 
-    if st.session_state.follow_school == school:
-        followup_dialog(school)
+    with tabs[0]:
+        render_graphical_school_report(school_row,school_teachers,school_raw,workdays,action_days)
 
-    if pdf_error:
-        st.caption("PDF could not be prepared on this run. Other actions remain available. Error: " + pdf_error)
+    with tabs[1]:
+        st.markdown("### Every teacher at your fingertips")
+        st.caption("The Full PDF Pack above already contains a separate report for every teacher. You can also inspect or download one teacher individually here.")
+        if school_teachers.empty:
+            st.info("No teacher records are available.")
+        else:
+            teacher_name=st.selectbox("Select teacher",school_teachers["Teacher"].sort_values().tolist(),key="quick_teacher")
+            tr=school_teachers[school_teachers["Teacher"]==teacher_name].iloc[0]
+            ev=school_raw[school_raw["Teacher Key"]==tr["Teacher Key"]].copy()
+            c1,c2,c3,c4=st.columns(4)
+            c1.metric("Health",f"{tr['Health Score']}/100")
+            c2.metric("Lesson KPI",f"{tr['Lesson KPI %']}%")
+            c3.metric("Library KPI",f"{tr['Library KPI %']}%")
+            c4.metric("Other KPI",f"{tr['Other KPI %']}%")
+            tdf=pd.DataFrame({"KPI":["Lesson Delivery","Library","Other Modules"],"Achievement":[tr["Lesson KPI %"],tr["Library KPI %"],tr["Other KPI %"]]})
+            tf=px.bar(tdf,x="KPI",y="Achievement",text_auto=".1f",range_y=[0,max(110,float(tdf["Achievement"].max())*1.1)],title=f"{teacher_name} — KPI achievement %")
+            st.plotly_chart(tf,use_container_width=True)
+            diagnosis,strength,focus,plan=teacher_auto_insights(tr,action_days)
+            x1,x2=st.columns(2)
+            x1.markdown(f'<div class="success-box"><b>Relative strength</b><br>{strength}</div>',unsafe_allow_html=True)
+            x2.markdown(f'<div class="warning-box"><b>Priority focus</b><br>{focus}</div>',unsafe_allow_html=True)
+            st.markdown(f'<div class="insight-box"><b>{action_days}-day plan</b><br>{plan}</div>',unsafe_allow_html=True)
+            teacher_pdf=make_premium_teacher_pdf(tr,ev,start_date,end_date,action_days)
+            st.download_button("⬇ Download this Teacher 360 PDF",teacher_pdf,file_name=re.sub(r"[^A-Za-z0-9]+","_",teacher_name)+"_360_Report.pdf",mime="application/pdf",use_container_width=True)
+            if not ev.empty:
+                st.dataframe(ev[["DateTime","Raw Module","Grade","Subject","Book","Minutes"]].sort_values("DateTime",ascending=False),use_container_width=True,hide_index=True,height=320)
 
-    # Missing contact data is editable here instead of forcing a trip to another screen.
-    if not phone or not group_url:
-        with st.expander("➕ Complete school contact once", expanded=False):
-            c1, c2 = st.columns(2)
-            quick_phone = c1.text_input("KDM mobile number", value=phone, key=f"quick_phone_{school}")
-            quick_group = c2.text_input("WhatsApp group link", value=group_url, key=f"quick_group_{school}")
-            if st.button("Save contact", key=f"save_quick_contact_{school}"):
-                payload = {
-                    "school_name": school,
-                    "contact_phone": quick_phone.strip(),
-                    "whatsapp_group_url": quick_group.strip(),
-                    "updated_at": datetime.utcnow().isoformat(),
-                }
-                if contact:
-                    db_update("schools", payload, contact["id"])
-                else:
-                    db_insert("schools", payload)
-                st.rerun()
-
-    ai_col, msg_col = st.columns([1, 1])
-    with ai_col:
-        st.markdown("#### 🧠 Gemini Enhancement")
-        st.caption("Optional. Normal dashboard, PDF and WhatsApp do not wait for Gemini.")
-        if st.button("✨ Enhance Report with Gemini", type="primary", use_container_width=True, key=f"quick_ai_{school}"):
+    with tabs[2]:
+        st.markdown("### Gemini — optional deeper interpretation")
+        st.caption("The graphical PDF and Teacher 360 reports work without Gemini. AI only enriches the interpretation; it never recalculates KPIs.")
+        if st.button("✨ Generate evidence-backed management interpretation",type="primary",use_container_width=True,key=f"premium_ai_{school}"):
             try:
-                with st.spinner("Gemini is enriching the verified report..."):
-                    text, used_model = ai_generate(school_report_prompt(facts, action_days), force=True)
-                st.session_state[report_key] = text
-                st.session_state[report_key + "::model"] = used_model
+                with st.spinner("Gemini is interpreting verified facts..."):
+                    text_ai,used_model=ai_generate(school_report_prompt(facts,action_days),force=True)
+                st.session_state[ai_key]=text_ai
+                st.session_state[ai_key+"::model"]=used_model
                 st.rerun()
             except Exception as exc:
-                st.error(f"Gemini could not generate this report: {exc}")
-        if st.session_state.get(report_key + "::model"):
-            st.success("Gemini active: " + st.session_state[report_key + "::model"])
+                st.error(f"Gemini could not generate the interpretation: {exc}")
+        if st.session_state.get(ai_key):
+            render_report(st.session_state[ai_key])
+            if st.session_state.get(ai_key+"::model"): st.caption("Gemini model: "+st.session_state[ai_key+"::model"])
+        else:
+            st.info("No AI wait is required for the report. The graphical deterministic report is already available in the first tab and PDF pack.")
 
-    with msg_col:
-        st.markdown("#### 💬 Ready-to-Send Message")
-        st.text_area("Customized school message", message, height=215, key=f"quick_message_{school}")
-
-    st.markdown("#### 📄 Report Preview")
-    render_report(st.session_state[report_key])
-
-    st.markdown("#### 👩‍🏫 Priority Teachers")
-    if school_teachers.empty:
-        st.info("No teacher records are available for this school in the selected period.")
-    else:
-        st.dataframe(
-            school_teachers.sort_values(["Health Score", "Total Minutes"])[
-                ["Teacher", "Status", "Health Score", "Lesson KPI %", "Library KPI %", "Other KPI %", "Total Minutes"]
-            ].head(12),
-            use_container_width=True, hide_index=True,
-        )
+    with tabs[3]:
+        st.markdown("### Ready-to-send school communication")
+        st.text_area("Customized WhatsApp message",message,height=240,key=f"premium_message_{school}")
+        c1,c2=st.columns(2)
+        c1.link_button("💬 Open WhatsApp with message","https://wa.me/?text="+urllib.parse.quote(message),use_container_width=True)
+        if group_url: c2.link_button("👥 Open saved school group",group_url,use_container_width=True)
+        else: c2.button("👥 Save group link below",disabled=True,use_container_width=True)
+        with st.expander("School contact settings",expanded=not(bool(phone) and bool(group_url))):
+            p1,p2=st.columns(2)
+            quick_phone=p1.text_input("KDM mobile number",value=phone,key=f"quick_phone_{school}")
+            quick_group=p2.text_input("WhatsApp group link",value=group_url,key=f"quick_group_{school}")
+            if st.button("Save school contact",key=f"save_quick_contact_{school}"):
+                payload={"school_name":school,"contact_phone":quick_phone.strip(),"whatsapp_group_url":quick_group.strip(),"updated_at":datetime.utcnow().isoformat()}
+                if contact: db_update("schools",payload,contact["id"])
+                else: db_insert("schools",payload)
+                st.rerun()
 
 
 # =========================================================
@@ -1576,12 +1845,8 @@ elif page == "Teacher 360":
             st.error(f"Gemini report generation failed: {exc}")
 
     render_report(st.session_state[key])
-    pdf_bytes = make_text_pdf(
-        f"Teacher 360 Intelligence Report - {teacher_name}",
-        f"School: {school_filter} | Review Period: {start_date} to {end_date}",
-        st.session_state[key], evidence
-    )
-    st.download_button("⬇ Download Teacher 360 PDF", data=pdf_bytes, file_name=re.sub(r"[^A-Za-z0-9]+", "_", teacher_name) + "_360_Audit_Report.pdf", mime="application/pdf", use_container_width=True)
+    pdf_bytes = make_premium_teacher_pdf(teacher_row, evidence, start_date, end_date, action_days)
+    st.download_button("⬇ Download Graphical Teacher 360 PDF", data=pdf_bytes, file_name=re.sub(r"[^A-Za-z0-9]+", "_", teacher_name) + "_360_Audit_Report.pdf", mime="application/pdf", use_container_width=True)
 
 
 # =========================================================
